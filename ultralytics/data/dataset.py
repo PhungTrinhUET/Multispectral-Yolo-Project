@@ -9,6 +9,7 @@ from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from typing import Any
 
+import os
 import cv2
 import numpy as np
 import torch
@@ -86,6 +87,54 @@ class YOLODataset(BaseDataset):
         self.data = data
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
         super().__init__(*args, channels=self.data.get("channels", 3), **kwargs)
+
+    def load_image(self, i):
+        """
+        Custom Loader: Ghép ảnh từ 'dataset_raw' và 'dataset_ndvi'.
+        Tự động dò tìm đuôi file (jpg, png, tif) của ảnh NDVI.
+        """
+
+        # 1. Lấy đường dẫn ảnh gốc (từ dataset_raw)
+        f_base = self.im_files[i]
+        im_base = cv2.imread(f_base)  # (H, W, 3)
+
+        if im_base is None:
+             raise FileNotFoundError(f'[Lỗi] Không tìm thấy ảnh gốc: {f_base}')
+
+        # 2. Tạo đường dẫn cơ sở sang folder NDVI
+        # Thay thế folder cha 'dataset_raw' bằng 'dataset_ndvi'
+        f_ndvi_base = f_base.replace('/dataset_raw/', '/dataset_ndvi/')
+        
+        f_ndvi_no_ext = os.path.splitext(f_ndvi_base)[0]
+
+        # 3. Dò tìm file NDVI 
+        im_ndvi = None
+        # Danh sách đuôi ưu tiên: png (phổ biến cho mask/ndvi), tif, jpg
+        valid_extensions = ['.png', '.tif', '.tiff', '.jpg', '.jpeg']
+        
+        found_path = ""
+        for ext in valid_extensions:
+            path_check = f_ndvi_no_ext + ext
+            if os.path.exists(path_check):
+                found_path = path_check
+                # Load ảnh (flag=-1 để giữ nguyên depth nếu là tif, hoặc 0 cho gray)
+                im_ndvi = cv2.imread(path_check, cv2.IMREAD_GRAYSCALE)
+                break
+        
+        if im_ndvi is None:
+            debug_path = f_ndvi_no_ext + ".[png|tif|jpg]"
+            raise FileNotFoundError(f'[Lỗi] Không tìm thấy file NDVI (đã thử png, tif, jpg).\nĐường dẫn gốc: {debug_path}')
+
+        # 4. Kiểm tra kích thước (Resize NDVI nếu lệch)
+        if im_ndvi.shape != im_base.shape[:2]:
+            im_ndvi = cv2.resize(im_ndvi, (im_base.shape[1], im_base.shape[0]))
+
+        # 5. GHÉP KÊNH (Stacking) -> (H,W,4)
+        im_final = np.concatenate((im_base, im_ndvi[:, :, None]), axis=2)
+
+        # 6. Trả về kết quả
+        h0, w0 = im_final.shape[:2]
+        return im_final, (h0, w0), im_final.shape[:2]
 
     def cache_labels(self, path: Path = Path("./labels.cache")) -> dict:
         """Cache dataset labels, check images and read shapes.
