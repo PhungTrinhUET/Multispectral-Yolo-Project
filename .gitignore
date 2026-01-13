@@ -203,3 +203,8 @@ calibration_*.npy
 # Training logs
 args.yaml
 results.csv
+runs/
+dataset_raw/
+dataset_ndvi/
+__pycache__/
+*.pt

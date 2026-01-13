@@ -1,0 +1,13 @@
+# dataset_melon.yaml
+path: /home/tower2080/Documents/DuaLuoi/yolov5/data_compact/dataset_raw # Đường dẫn đến ảnh RGNIR gốc
+train: images/train
+val: images/val
+test: images/test
+
+nc: 4
+
+names: 
+  0: truoc_thu_phan
+  1: sau_thu_phan
+  2: cay40
+  3: tao_ngot
