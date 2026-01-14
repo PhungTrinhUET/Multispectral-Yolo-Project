@@ -70,7 +70,7 @@ def benchmark_model(weights_path, data_path, imgsz=1280, device='0'):
 
 if __name__ == '__main__':
     # Cấu hình đường dẫn
-    WEIGHTS = 'Multispectral_DuaLuoi_Project/train_final_1280px_4ch/weights/best.pt' # Đường dẫn sau khi train xong
+    WEIGHTS = '/home/tower2080/Documents/DuaLuoi/Multispectral_YOLO_Project/ultralytics/Multispectral_DuaLuoi_Project/Exp2_Pretrain_1280px/weights/best.pt'
     DATA_YAML = '/home/tower2080/Documents/DuaLuoi/yolov5/data_compact/dataset_raw/data.yaml'
     
     # Chạy benchmark
@@ -79,4 +79,4 @@ if __name__ == '__main__':
         benchmark_model(WEIGHTS, DATA_YAML, imgsz=1280)
     except Exception as e:
         print(f"Chưa chạy được Benchmark vì: {e}")
-        print("Hãy đợi Train xong rồi chạy file này!")
+        print("DONE")
