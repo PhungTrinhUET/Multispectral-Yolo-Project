@@ -52,6 +52,7 @@ from ultralytics.nn.modules import (
     HGBlock,
     HGStem,
     ImagePoolingAttn,
+    InputContainer, #Add new
     Index,
     LRPCHead,
     Pose,
@@ -1643,6 +1644,12 @@ def parse_model(d, ch, verbose=True):
             c2 = args[0]
             c1 = ch[f]
             args = [*args[1:]]
+        
+        # === ADD mới ===
+        elif m is InputContainer:
+            c2 = ch[f]        # Output channels = Input channels
+            args = [c2, c2]   # Tự động nạp c1, c2 vào args để khởi tạo class
+
         else:
             c2 = ch[f]
 

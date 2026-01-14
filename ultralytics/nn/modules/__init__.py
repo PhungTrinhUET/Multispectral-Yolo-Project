@@ -31,6 +31,7 @@ from .block import (
     SPPELAN,
     SPPF,
     A2C2f,
+    InputContainer,  # <--- NEW
     AConv,
     ADown,
     Attention,
@@ -169,6 +170,7 @@ __all__ = (
     "RepVGGDW",
     "ResNetLayer",
     "SCDown",
+    "InputContainer", # MỚI
     "Segment",
     "SpatialAttention",
     "TorchVision",

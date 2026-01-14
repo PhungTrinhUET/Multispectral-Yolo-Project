@@ -1945,3 +1945,15 @@ class SAVPE(nn.Module):
         aggregated = score.transpose(-2, -3) @ x.reshape(B, self.c, C // self.c, -1).transpose(-1, -2)
 
         return F.normalize(aggregated.transpose(-2, -3).reshape(B, Q, -1), dim=-1, p=2)
+
+class InputContainer(nn.Module):
+    """
+    Một class chỉ để giữ Input và trả về chính nó.
+    Dùng làm điểm xuất phát cho Dual Backbone.
+    """
+    def __init__(self, c1, c2):
+        super().__init__()
+        # Không làm gì cả, c1 c2 chỉ để khớp format YOLO
+    
+    def forward(self, x):
+        return x  # Trả về Input gốc
