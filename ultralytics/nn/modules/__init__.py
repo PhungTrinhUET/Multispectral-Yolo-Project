@@ -32,6 +32,7 @@ from .block import (
     SPPF,
     A2C2f,
     InputContainer,  # <--- NEW
+    FusionAdd,
     AConv,
     ADown,
     Attention,
@@ -171,6 +172,7 @@ __all__ = (
     "ResNetLayer",
     "SCDown",
     "InputContainer", # MỚI
+    "FusionAdd", # MỚI
     "Segment",
     "SpatialAttention",
     "TorchVision",

@@ -70,7 +70,7 @@ def benchmark_model(weights_path, data_path, imgsz=1280, device='0'):
 
 if __name__ == '__main__':
     # Cấu hình đường dẫn
-    WEIGHTS = '/home/tower2080/Documents/DuaLuoi/Multispectral_YOLO_Project/ultralytics/Multispectral_DuaLuoi_Project/Exp4_Dual_CustomPretrain/weights/best.pt'
+    WEIGHTS = '/home/tower2080/Documents/DuaLuoi/Multispectral_YOLO_Project/ultralytics/Multispectral_DuaLuoi_Project/Exp6_Dual_ADD_CustomPretrain/weights/best.pt'
     DATA_YAML = '/home/tower2080/Documents/DuaLuoi/yolov5/data_compact/dataset_raw/data.yaml'
     
     # Chạy benchmark

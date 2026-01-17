@@ -19,7 +19,8 @@ def perform_surgery():
     # 2. Khởi tạo model Dual rỗng (Patient Model)
     print("   -> Creating Dual-Backbone Skeleton...")
     # Lưu ý: Cần file config nằm đúng chỗ
-    dual_model = YOLO('configs/yolo11_dual_backbone.yaml') 
+    # dual_model = YOLO('configs/yolo11_dual_backbone.yaml') (CONCAT METHOD)
+    dual_model = YOLO('configs/yolo11_dual_add.yaml', task='detect') #(ADD METHOD)
     
     # Ép tạo weights bằng cách dry-run 1 lần (quan trọng để khởi tạo các layer)
     try:
@@ -109,7 +110,8 @@ def perform_surgery():
     target_model.load_state_dict(target_dict)
     
     # Lưu file
-    save_path = 'yolo_dual_pretrain.pt'
+    # save_path = 'yolo_dual_pretrain.pt' (CONCAT METHOD)
+    save_path = 'yolo_dual_add_pretrain.pt' #(ADD METHOD)
     torch.save({'model': target_model}, save_path) # Lưu dạng raw dictionary bọc trong 'model' để YOLO load được
     # Hoặc chuẩn hơn theo Ultralytics format:
     ckpt = {'epoch': -1, 'best_fitness': None, 'model': target_model, 'optimizer': None}

@@ -1957,3 +1957,16 @@ class InputContainer(nn.Module):
     
     def forward(self, x):
         return x  # Trả về Input gốc
+    
+# FusionAdd method
+class FusionAdd(nn.Module):
+    """
+    Cộng element-wise 2 feature maps: Input = [x1, x2]. Output = x1 + x2.
+    Yêu cầu: x1 và x2 phải cùng kích thước (Channels, H, W).
+    """
+    def __init__(self, c1, c2):
+        super().__init__()
+    
+    def forward(self, x):
+        # x là list gồm [input1, input2]
+        return x[0] + x[1]

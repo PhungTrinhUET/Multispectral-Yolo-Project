@@ -1,0 +1,73 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Dual-Stream Backbone with ADD FUSION (RGB + NDVI)
+# VERSION 2: Adjusted P4 channels to match YOLOv11s source exactly (256ch)
+
+# Parameters
+nc: 4
+scales:
+  custom: [1.00, 1.00, 1024]
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, InputContainer, []] # 0
+
+  # === BRANCH 1: RGB (YOLOv11s) ===
+  - [0, 1, Conv, [32, 3, 2]] # 1
+  - [-1, 1, Conv, [64, 3, 2]] # 2
+  - [-1, 1, C3k2, [128, False, 0.25]] # 3
+  - [-1, 1, Conv, [128, 3, 2]] # 4
+  - [-1, 1, C3k2, [256, False, 0.25]] # 5 (P3 RGB: 256ch)
+  - [-1, 1, Conv, [256, 3, 2]] # 6
+  - [-1, 1, C3k2, [256, True, 0.25]] # 7 (FIX: P4 RGB giảm xuống 256 cho khớp Source)
+  - [-1, 1, Conv, [512, 3, 2]] # 8 (Up lên 512 ở P5)
+  - [-1, 1, C3k2, [512, True, 0.25]] # 9 (P5 RGB: 512ch)
+  - [-1, 1, SPPF, [512, 5]] # 10
+
+  # === BRANCH 2: NDVI (YOLOv11n) ===
+  # Tương tự, giảm P4 xuống một nửa
+  - [0, 1, Conv, [16, 3, 2]] # 11
+  - [-1, 1, Conv, [32, 3, 2]] # 12
+  - [-1, 1, C3k2, [64, False, 0.25]] # 13
+  - [-1, 1, Conv, [64, 3, 2]] # 14
+  - [-1, 1, C3k2, [128, False, 0.25]] # 15 (P3 NDVI: 128ch)
+  - [-1, 1, Conv, [128, 3, 2]] # 16
+  - [-1, 1, C3k2, [128, True, 0.25]] # 17 (FIX: P4 NDVI giảm xuống 128)
+  - [-1, 1, Conv, [256, 3, 2]] # 18
+  - [-1, 1, C3k2, [256, True, 0.25]] # 19 (P5 NDVI: 256ch)
+  - [-1, 1, SPPF, [256, 5]] # 20
+
+head:
+  # === FUSION NECK (ADD STYLE - UPDATED) ===
+
+  # Fusion P3: RGB(256) + NDVI(128->256)
+  - [15, 1, Conv, [256, 1, 1]] # 21
+  - [[5, 21], 1, FusionAdd, []] # 22 (Fused P3: 256ch)
+
+  # Fusion P4: RGB(256) + NDVI(128->256) (Cập nhật theo P4 mới)
+  - [17, 1, Conv, [256, 1, 1]] # 23 (Nâng NDVI từ 128 lên 256)
+  - [[7, 23], 1, FusionAdd, []] # 24 (Fused P4: 256ch)
+
+  # Fusion P5: RGB(512) + NDVI(256->512)
+  - [20, 1, Conv, [512, 1, 1]] # 25
+  - [[10, 25], 1, FusionAdd, []] # 26 (Fused P5: 512ch)
+
+  # === HEAD ===
+  - [26, 1, C3k2, [512, False]] # 27 (Head P5)
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 28
+  - [[-1, 24], 1, Concat, [1]] # 29 (Concat với Fused P4)
+  - [-1, 1, C3k2, [256, False]] # 30 (Head P4: Xử lý 256+256=512 -> ra 256)
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 31
+  - [[-1, 22], 1, Concat, [1]] # 32 (Concat với Fused P3)
+  - [-1, 1, C3k2, [128, False]] # 33 (Head P3)
+
+  - [-1, 1, Conv, [128, 3, 2]] # 34
+  - [[-1, 30], 1, Concat, [1]] # 35
+  - [-1, 1, C3k2, [256, False]] # 36
+
+  - [-1, 1, Conv, [256, 3, 2]] # 37
+  - [[-1, 27], 1, Concat, [1]] # 38
+  - [-1, 1, C3k2, [512, True]] # 39
+
+  - [[33, 36, 39], 1, Detect, [nc]] # 40

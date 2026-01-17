@@ -53,6 +53,7 @@ from ultralytics.nn.modules import (
     HGStem,
     ImagePoolingAttn,
     InputContainer, #Add new
+    FusionAdd, #Add new
     Index,
     LRPCHead,
     Pose,
@@ -1646,9 +1647,16 @@ def parse_model(d, ch, verbose=True):
             args = [*args[1:]]
         
         # === ADD mới ===
-        elif m is InputContainer:
-            c2 = ch[f]        # Output channels = Input channels
-            args = [c2, c2]   # Tự động nạp c1, c2 vào args để khởi tạo class
+        elif m in {InputContainer, FusionAdd}:
+            if isinstance(f, list):
+                # Trường hợp FusionAdd (f = [5, 21]) -> Lấy kênh của nhánh đầu tiên
+                c2 = ch[f[0]]
+            else:
+                # Trường hợp InputContainer (f = -1) -> Lấy kênh input bình thường
+                c2 = ch[f]
+            args = [c2, c2]
+            # c2 = ch[f]        # Output channels = Input channels (CONCAT)
+            # args = [c2, c2]   # Tự động nạp c1, c2 vào args để khởi tạo class (CONCAT)
 
         else:
             c2 = ch[f]
