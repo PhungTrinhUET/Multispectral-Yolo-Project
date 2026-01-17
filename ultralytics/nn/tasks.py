@@ -54,6 +54,7 @@ from ultralytics.nn.modules import (
     ImagePoolingAttn,
     InputContainer, #Add new
     FusionAdd, #Add new
+    FusionAFF, # Add new
     Index,
     LRPCHead,
     Pose,
@@ -1647,16 +1648,16 @@ def parse_model(d, ch, verbose=True):
             args = [*args[1:]]
         
         # === ADD mới ===
-        elif m in {InputContainer, FusionAdd}:
+        elif m in {InputContainer, FusionAdd, FusionAFF}: # Thêm FusionAFF 
             if isinstance(f, list):
-                # Trường hợp FusionAdd (f = [5, 21]) -> Lấy kênh của nhánh đầu tiên
-                c2 = ch[f[0]]
+                c2 = ch[f[0]] # Lấy kênh của nhánh đầu tiên
             else:
-                # Trường hợp InputContainer (f = -1) -> Lấy kênh input bình thường
                 c2 = ch[f]
-            args = [c2, c2]
-            # c2 = ch[f]        # Output channels = Input channels (CONCAT)
-            # args = [c2, c2]   # Tự động nạp c1, c2 vào args để khởi tạo class (CONCAT)
+            # AFF yêu cầu đầu vào channels (c2) để khởi tạo các lớp Conv bên trong
+            if m == FusionAFF:
+                args = [c2] 
+            else:
+                args = [c2, c2] # InputContainer/FusionAdd không cần tham số channels
 
         else:
             c2 = ch[f]

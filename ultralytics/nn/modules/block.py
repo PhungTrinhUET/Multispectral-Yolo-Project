@@ -1970,3 +1970,42 @@ class FusionAdd(nn.Module):
     def forward(self, x):
         # x là list gồm [input1, input2]
         return x[0] + x[1]
+    
+# Fusion AFF (Agrifusion)
+class FusionAFF(nn.Module):
+    """
+    FIXED VERSION: Uses GroupNorm (LayerNorm style) for Global Branch 
+    to handle batch_size=1 cases.
+    """
+    def __init__(self, channels, r=4):
+        super().__init__()
+        inter_channels = int(channels / r)
+
+        # Local Branch (Giữ nguyên BN vì spatial size lớn, không bị lỗi)
+        self.local_att = nn.Sequential(
+            nn.Conv2d(channels, inter_channels, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(inter_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inter_channels, channels, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(channels),
+        )
+
+        # Global Branch (FIX: Dùng GroupNorm)
+        self.global_att = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, inter_channels, kernel_size=1, stride=1, padding=0),
+            nn.GroupNorm(1, inter_channels), # Fix lỗi Batch=1
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inter_channels, channels, kernel_size=1, stride=1, padding=0),
+            nn.GroupNorm(1, channels),       # Fix lỗi Batch=1
+        )
+
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        rgb, nir = x[0], x[1]
+        xa = rgb + nir
+        xl = self.local_att(xa)
+        xg = self.global_att(xa)
+        weights = self.sigmoid(xl + xg)
+        return 2.0 * (weights * rgb + (1.0 - weights) * nir)
