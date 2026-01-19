@@ -34,6 +34,7 @@ from .block import (
     InputContainer,  # <--- NEW
     FusionAdd, # NEW
     FusionAFF, # NEW
+    FusionRectify, #NEW
     AConv,
     ADown,
     Attention,
@@ -175,6 +176,7 @@ __all__ = (
     "InputContainer", # MỚI
     "FusionAdd", # MỚI
     "FusionAFF", # MỚI 
+    "FusionRectify", #MỚI
     "Segment",
     "SpatialAttention",
     "TorchVision",

@@ -55,6 +55,7 @@ from ultralytics.nn.modules import (
     InputContainer, #Add new
     FusionAdd, #Add new
     FusionAFF, # Add new
+    FusionRectify, # Add new
     Index,
     LRPCHead,
     Pose,
@@ -1647,21 +1648,26 @@ def parse_model(d, ch, verbose=True):
             c1 = ch[f]
             args = [*args[1:]]
         
-        # === ADD mới ===
-        elif m in {InputContainer, FusionAdd, FusionAFF}: # Thêm FusionAFF 
+        # === NEW ===
+        elif m in {InputContainer, FusionAdd, FusionAFF, FusionRectify}: 
             if isinstance(f, list):
-                c2 = ch[f[0]] # Lấy kênh của nhánh đầu tiên
+                c2 = ch[f[0]]
             else:
                 c2 = ch[f]
-            # AFF yêu cầu đầu vào channels (c2) để khởi tạo các lớp Conv bên trong
-            if m == FusionAFF:
-                args = [c2] 
+
+            # Logic truyền tham số args:
+            # FusionAFF và FusionRectify cần biết số kênh (c2) để tạo Conv2d
+            if m in {FusionAFF, FusionRectify}: 
+                args = [c2]
+            # InputContainer và FusionAdd (cộng thô) không cần tham số channels
             else:
-                args = [c2, c2] # InputContainer/FusionAdd không cần tham số channels
+                args = [c2, c2] 
+        # =====================================
 
         else:
             c2 = ch[f]
 
+        # Khởi tạo module thực tế
         m_ = torch.nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
         t = str(m)[8:-2].replace("__main__.", "")  # module type
         m_.np = sum(x.numel() for x in m_.parameters())  # number params
@@ -1673,8 +1679,8 @@ def parse_model(d, ch, verbose=True):
         if i == 0:
             ch = []
         ch.append(c2)
+    
     return torch.nn.Sequential(*layers), sorted(save)
-
 
 def yaml_model_load(path):
     """Load a YOLOv8 model from a YAML file.

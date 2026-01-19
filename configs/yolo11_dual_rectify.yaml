@@ -1,0 +1,76 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+# EXPERIMENT 9: Dual-Stream Backbone with CMX RECTIFICATION FUSION
+# Strategy: RGB + NIR -> Cross-Modal Rectification -> Add
+
+# Parameters
+nc: 4
+scales:
+  custom: [1.00, 1.00, 1024]
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, InputContainer, []] # 0
+
+  # === BRANCH 1: RGB (YOLOv11s Source) ===
+  - [0, 1, Conv, [32, 3, 2]] # 1
+  - [-1, 1, Conv, [64, 3, 2]] # 2
+  - [-1, 1, C3k2, [128, False, 0.25]] # 3
+  - [-1, 1, Conv, [128, 3, 2]] # 4
+  - [-1, 1, C3k2, [256, False, 0.25]] # 5 (P3 RGB)
+  - [-1, 1, Conv, [256, 3, 2]] # 6
+  - [-1, 1, C3k2, [256, True, 0.25]] # 7 (P4 RGB - Giữ 256 để khớp Pretrain)
+  - [-1, 1, Conv, [512, 3, 2]] # 8
+  - [-1, 1, C3k2, [512, True, 0.25]] # 9 (P5 RGB)
+  - [-1, 1, SPPF, [512, 5]] # 10
+
+  # === BRANCH 2: NDVI (YOLOv11n Source) ===
+  - [0, 1, Conv, [16, 3, 2]] # 11
+  - [-1, 1, Conv, [32, 3, 2]] # 12
+  - [-1, 1, C3k2, [64, False, 0.25]] # 13
+  - [-1, 1, Conv, [64, 3, 2]] # 14
+  - [-1, 1, C3k2, [128, False, 0.25]] # 15 (P3 NDVI)
+  - [-1, 1, Conv, [128, 3, 2]] # 16
+  - [-1, 1, C3k2, [128, True, 0.25]] # 17 (P4 NDVI - Giữ 128 để khớp Pretrain)
+  - [-1, 1, Conv, [256, 3, 2]] # 18
+  - [-1, 1, C3k2, [256, True, 0.25]] # 19 (P5 NDVI)
+  - [-1, 1, SPPF, [256, 5]] # 20
+
+head:
+  # === FUSION NECK (RECTIFY STYLE) ===
+  # Thay thế FusionAFF bằng FusionRectify
+
+  # --- Fusion P3 ---
+  # RGB(256) + NDVI(128). Nâng NDVI lên 256
+  - [15, 1, Conv, [256, 1, 1]] # 21 (Align channel)
+  - [[5, 21], 1, FusionRectify, []] # 22 (Fused P3 with CMX Rectify)
+
+  # --- Fusion P4 ---
+  # RGB(256) + NDVI(128). Nâng NDVI lên 256
+  - [17, 1, Conv, [256, 1, 1]] # 23 (Align channel)
+  - [[7, 23], 1, FusionRectify, []] # 24 (Fused P4 with CMX Rectify)
+
+  # --- Fusion P5 ---
+  # RGB(512) + NDVI(256). Nâng NDVI lên 512
+  - [20, 1, Conv, [512, 1, 1]] # 25 (Align channel)
+  - [[10, 25], 1, FusionRectify, []] # 26 (Fused P5 with CMX Rectify)
+
+  # === HEAD (Standard YOLOv11s Logic) ===
+  - [26, 1, C3k2, [512, False]] # 27
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 28
+  - [[-1, 24], 1, Concat, [1]] # 29
+  - [-1, 1, C3k2, [256, False]] # 30
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 31
+  - [[-1, 22], 1, Concat, [1]] # 32
+  - [-1, 1, C3k2, [128, False]] # 33
+
+  - [-1, 1, Conv, [128, 3, 2]] # 34
+  - [[-1, 30], 1, Concat, [1]] # 35
+  - [-1, 1, C3k2, [256, False]] # 36
+
+  - [-1, 1, Conv, [256, 3, 2]] # 37
+  - [[-1, 27], 1, Concat, [1]] # 38
+  - [-1, 1, C3k2, [512, True]] # 39
+
+  - [[33, 36, 39], 1, Detect, [nc]] # 40

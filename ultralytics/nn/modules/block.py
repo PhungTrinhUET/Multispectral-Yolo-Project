@@ -2009,3 +2009,53 @@ class FusionAFF(nn.Module):
         xg = self.global_att(xa)
         weights = self.sigmoid(xl + xg)
         return 2.0 * (weights * rgb + (1.0 - weights) * nir)
+    
+class FusionRectify(nn.Module):
+    """
+    PAPER: CMX: Cross-Modal Fusion for RGB-X Semantic Segmentation With Transformers
+    https://ieeexplore.ieee.org/document/10231003
+    
+    Simplified Cross-Modal Feature Rectification Module (CMX Style).
+    Mục tiêu: Dùng đặc trưng của RGB để hiệu chỉnh NIR và ngược lại.
+    Công thức: 
+        F_rgb' = F_rgb + F_rgb * Sigmoid(Conv(F_nir))
+        F_nir' = F_nir + F_nir * Sigmoid(Conv(F_rgb))
+        Output = F_rgb' + F_nir'
+    """
+    def __init__(self, channels):
+        super().__init__()
+        # Giảm số kênh 4 lần ở lớp trung gian để nhẹ (Bottleneck factor = 4)
+        inter_channels = channels // 4
+        
+        # Nhánh hiệu chỉnh cho RGB (Nhìn NIR để sửa RGB)
+        self.rectify_rgb = nn.Sequential(
+            nn.Conv2d(channels, inter_channels, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(inter_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inter_channels, channels, 1, 1, 0, bias=False),
+            nn.Sigmoid() # Trả về trọng số từ 0 đến 1
+        )
+        
+        # Nhánh hiệu chỉnh cho NIR (Nhìn RGB để sửa NIR)
+        self.rectify_nir = nn.Sequential(
+            nn.Conv2d(channels, inter_channels, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(inter_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inter_channels, channels, 1, 1, 0, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        # x là list [rgb, nir]
+        rgb, nir = x[0], x[1]
+        
+        # 1. Hiệu chỉnh RGB: 
+        # "Cộng thêm vào RGB một lượng thông tin được điều phối bởi NIR"
+        rgb_rectified = rgb + rgb * self.rectify_rgb(nir)
+        
+        # 2. Hiệu chỉnh NIR:
+        # "Cộng thêm vào NIR một lượng thông tin được điều phối bởi RGB"
+        nir_rectified = nir + nir * self.rectify_nir(rgb)
+        
+        # 3. Cộng lại (Feature Aggregation)
+        return rgb_rectified + nir_rectified
