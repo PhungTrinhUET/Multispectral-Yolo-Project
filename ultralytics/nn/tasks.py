@@ -56,6 +56,7 @@ from ultralytics.nn.modules import (
     FusionAdd, #Add new
     FusionAFF, # Add new
     FusionRectify, # Add new
+    FusionDeformRectify, #Add new
     Index,
     LRPCHead,
     Pose,
@@ -1649,7 +1650,7 @@ def parse_model(d, ch, verbose=True):
             args = [*args[1:]]
         
         # === NEW ===
-        elif m in {InputContainer, FusionAdd, FusionAFF, FusionRectify}: 
+        elif m in {InputContainer, FusionAdd, FusionAFF, FusionRectify, FusionDeformRectify}: 
             if isinstance(f, list):
                 c2 = ch[f[0]]
             else:
@@ -1657,7 +1658,7 @@ def parse_model(d, ch, verbose=True):
 
             # Logic truyền tham số args:
             # FusionAFF và FusionRectify cần biết số kênh (c2) để tạo Conv2d
-            if m in {FusionAFF, FusionRectify}: 
+            if m in {FusionAFF, FusionRectify, FusionDeformRectify}: 
                 args = [c2]
             # InputContainer và FusionAdd (cộng thô) không cần tham số channels
             else:

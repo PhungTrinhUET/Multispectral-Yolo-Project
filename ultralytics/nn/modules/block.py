@@ -11,6 +11,7 @@ from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
+from torchvision.ops import DeformConv2d # <--- NEW, Import DCN 
 
 __all__ = (
     "C1",
@@ -2014,7 +2015,7 @@ class FusionRectify(nn.Module):
     """
     PAPER: CMX: Cross-Modal Fusion for RGB-X Semantic Segmentation With Transformers
     https://ieeexplore.ieee.org/document/10231003
-    
+
     Simplified Cross-Modal Feature Rectification Module (CMX Style).
     Mục tiêu: Dùng đặc trưng của RGB để hiệu chỉnh NIR và ngược lại.
     Công thức: 
@@ -2059,3 +2060,65 @@ class FusionRectify(nn.Module):
         
         # 3. Cộng lại (Feature Aggregation)
         return rgb_rectified + nir_rectified
+    
+
+class FusionDeformRectify(nn.Module):
+    """
+    ULTIMATE FUSION (STABLE VERSION): 
+    - Alignment: Dùng Conv2d thường (Implicit Alignment) thay cho DCN để tránh lỗi SegFault.
+    - Rectification: CMX Block.
+    - Attention: ECA Block.
+    """
+    def __init__(self, channels):
+        super().__init__()
+        inter_channels = channels // 4
+        
+        # === 1. ALIGNMENT BLOCK (SAFE) ===
+        # Thay DCN bằng Conv 3x3 để học cách căn chỉnh đặc trưng
+        # Đây gọi là "Learnable Rigid Alignment"
+        self.align_rgb = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.align_nir = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        
+        # === 2. CMX RECTIFICATION BLOCK (Giữ nguyên) ===
+        self.rectify_rgb = nn.Sequential(
+            nn.Conv2d(channels, inter_channels, 1, bias=False),
+            nn.BatchNorm2d(inter_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inter_channels, channels, 1, bias=False),
+            nn.Sigmoid()
+        )
+        
+        self.rectify_nir = nn.Sequential(
+            nn.Conv2d(channels, inter_channels, 1, bias=False),
+            nn.BatchNorm2d(inter_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inter_channels, channels, 1, bias=False),
+            nn.Sigmoid()
+        )
+        
+        # === 3. ECA ATTENTION BLOCK (Giữ nguyên) ===
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv_eca = nn.Conv1d(1, 1, kernel_size=3, padding=1, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        rgb, nir = x[0], x[1]
+        
+        # --- BƯỚC 1: ALIGNMENT ---
+        # Dùng Conv thường để căn chỉnh (Robust & Fast)
+        rgb_aligned = self.align_rgb(rgb)
+        nir_aligned = self.align_nir(nir)
+
+        # --- BƯỚC 2: RECTIFICATION ---
+        rgb_rectified = rgb_aligned + rgb_aligned * self.rectify_rgb(nir_aligned)
+        nir_rectified = nir_aligned + nir_aligned * self.rectify_nir(rgb_aligned)
+        
+        fused = rgb_rectified + nir_rectified
+        
+        # --- BƯỚC 3: SELECTION ---
+        b, c, h, w = fused.size()
+        y = self.avg_pool(fused).view(b, 1, c)
+        y = self.conv_eca(y)
+        y = self.sigmoid(y).view(b, c, 1, 1)
+        
+        return fused * y

@@ -22,7 +22,8 @@ def perform_surgery():
     # dual_model = YOLO('configs/yolo11_dual_backbone.yaml') (CONCAT METHOD)
     # dual_model = YOLO('configs/yolo11_dual_add.yaml', task='detect') #(ADD METHOD)
     # dual_model = YOLO('configs/yolo11_dual_aff.yaml', task='detect') # (AFF method)
-    dual_model = YOLO('configs/yolo11_dual_rectify.yaml', task='detect') # METHOD CMX
+    # dual_model = YOLO('configs/yolo11_dual_rectify.yaml', task='detect') # METHOD CMX
+    dual_model = YOLO('configs/yolo11_dual_deform_rectify.yaml', task='detect') #METHOD CMX version 2
     
     # Ép tạo weights bằng cách dry-run 1 lần (quan trọng để khởi tạo các layer)
     try:
@@ -115,7 +116,8 @@ def perform_surgery():
     # save_path = 'yolo_dual_pretrain.pt' (CONCAT METHOD)
     # save_path = 'yolo_dual_add_pretrain.pt' #(ADD METHOD)
     # save_path = 'yolo_dual_aff_pretrain.pt' #(AFF Method)
-    save_path = 'yolo_dual_rectify_pretrain.pt' # (CMX method)
+    # save_path = 'yolo_dual_rectify_pretrain.pt' # (CMX method)
+    save_path = 'yolo_dual_deform_pretrain.pt' # CMX Version 2
     torch.save({'model': target_model}, save_path) # Lưu dạng raw dictionary bọc trong 'model' để YOLO load được
     # Hoặc chuẩn hơn theo Ultralytics format:
     ckpt = {'epoch': -1, 'best_fitness': None, 'model': target_model, 'optimizer': None}
