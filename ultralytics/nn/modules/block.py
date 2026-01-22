@@ -1946,18 +1946,36 @@ class SAVPE(nn.Module):
         aggregated = score.transpose(-2, -3) @ x.reshape(B, self.c, C // self.c, -1).transpose(-1, -2)
 
         return F.normalize(aggregated.transpose(-2, -3).reshape(B, Q, -1), dim=-1, p=2)
-
+"""
 class InputContainer(nn.Module):
-    """
-    Một class chỉ để giữ Input và trả về chính nó.
-    Dùng làm điểm xuất phát cho Dual Backbone.
-    """
     def __init__(self, c1, c2):
         super().__init__()
         # Không làm gì cả, c1 c2 chỉ để khớp format YOLO
     
     def forward(self, x):
         return x  # Trả về Input gốc
+"""
+
+class InputContainer(nn.Module):
+    """
+    Module tách kênh an toàn.
+    Hỗ trợ cả trường hợp dummy input (ch=3) lúc khởi tạo model.
+    """
+    def __init__(self, c1=4, c2=4):
+        super().__init__()
+
+    def forward(self, x):
+        # Kiểm tra nếu đầu vào thiếu kênh (VD: dummy pass kiểm tra stride chỉ có 3 kênh)
+        if x.shape[1] < 4:
+            # Tạo kênh NIR giả (tất cả bằng 0) để không bị lỗi dimension
+            # Lấy slice 0:1 để giữ nguyên số chiều [Batch, 1, H, W]
+            nir = torch.zeros_like(x[:, 0:1, ...])
+        else:
+            # Lấy kênh thứ 4 (NIR) chuẩn
+            nir = x[:, 3:4, ...] 
+            
+        # Trả về [RGB (3 kênh), NIR (1 kênh)]
+        return [x[:, :3, ...], nir]
     
 # FusionAdd method
 class FusionAdd(nn.Module):
@@ -2122,3 +2140,87 @@ class FusionDeformRectify(nn.Module):
         y = self.sigmoid(y).view(b, c, 1, 1)
         
         return fused * y
+    
+# --- Thêm vào ultralytics/nn/modules/block.py ---
+
+class SpatialAttention(nn.Module):
+    """
+    Module con: Spatial Attention (Lấy cảm hứng từ bài báo CBAM)
+    Mục tiêu: Tìm ra "ĐÂU LÀ VỊ TRÍ QUAN TRỌNG?" trong bức ảnh.
+    """
+    def __init__(self, kernel_size=7):
+        super().__init__()
+        # Kernel 7x7 giúp nhìn vùng rộng hơn (receptive field lớn)
+        # Input channel = 2 (Do gộp MaxPool và AvgPool) -> Output channel = 1 (Spatial Map)
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size//2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # 1. Average Pooling theo trục kênh (ép 256 kênh thành 1) -> [B, 1, H, W]
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        # 2. Max Pooling theo trục kênh -> [B, 1, H, W]
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        # 3. Gộp lại -> [B, 2, H, W]
+        x = torch.cat([avg_out, max_out], dim=1)
+        # 4. Conv + Sigmoid -> Bản đồ nhiệt (0..1)
+        return self.sigmoid(self.conv(x))
+
+# --- DÁN VÀO CUỐI FILE ultralytics/nn/modules/block.py ---
+
+class SpatialAttention(nn.Module):
+    """
+    Module phụ: Spatial Attention (Lấy cảm hứng từ CBAM)
+    Mục tiêu: Tạo bản đồ nhiệt (Heatmap) để biết vị trí nào quan trọng.
+    """
+    def __init__(self, kernel_size=7):
+        super().__init__()
+        # Kernel 7x7 giúp nhìn vùng rộng (Receptive Field lớn)
+        # Input channel = 2 (Do gộp MaxPool và AvgPool) -> Output channel = 1
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size//2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # 1. Average Pooling theo trục kênh -> [B, 1, H, W]
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        # 2. Max Pooling theo trục kênh -> [B, 1, H, W]
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        # 3. Gộp lại -> [B, 2, H, W]
+        x = torch.cat([avg_out, max_out], dim=1)
+        # 4. Conv + Sigmoid -> Bản đồ nhiệt [0..1]
+        return self.sigmoid(self.conv(x))
+
+class FusionCrossCBAM(nn.Module):
+    """
+    EXP 11: CROSS-MODAL SPATIAL ATTENTION
+    """
+    def __init__(self, channels):
+        super().__init__()
+        # Module Spatial Attention riêng cho từng nhánh
+        self.sa_rgb = SpatialAttention(kernel_size=7)
+        self.sa_nir = SpatialAttention(kernel_size=7)
+        
+        # Lớp gộp cuối cùng: Conv 1x1 để trộn đặc trưng sau khi fusion
+        self.conv_out = nn.Conv2d(channels, channels, kernel_size=1)
+        self.bn = nn.BatchNorm2d(channels)
+        self.act = nn.SiLU()
+
+    def forward(self, x):
+        rgb, nir = x[0], x[1]
+        
+        # === BƯỚC 1: TẠO BATTENTION MAPS ===
+        nir_map = self.sa_nir(nir) 
+        
+        rgb_map = self.sa_rgb(rgb)
+        
+        # === BƯỚC 2: CROSS ENHANCEMENT ===
+        # Công thức: Original + (Original * AttentionMap)
+        rgb_enhanced = rgb + (rgb * nir_map)
+        
+        # Áp bản đồ RGB lên NIR
+        nir_enhanced = nir + (nir * rgb_map)
+        
+        # === BƯỚC 3: GỘP (FUSION) ===
+        fused = rgb_enhanced + nir_enhanced
+        
+        # Trộn đều bằng Conv 1x1
+        return self.act(self.bn(self.conv_out(fused)))

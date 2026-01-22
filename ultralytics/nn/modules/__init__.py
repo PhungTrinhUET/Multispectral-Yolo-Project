@@ -36,6 +36,7 @@ from .block import (
     FusionAFF, # NEW
     FusionRectify, #NEW
     FusionDeformRectify, #Add new
+    FusionCrossCBAM, # Add new
     AConv,
     ADown,
     Attention,
@@ -179,6 +180,7 @@ __all__ = (
     "FusionAFF", # MỚI 
     "FusionRectify", #MỚI
     "FusionDeformRectify" #NEW
+    "FusionCrossCBAM" #NEW
     "Segment",
     "SpatialAttention",
     "TorchVision",

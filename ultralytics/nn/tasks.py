@@ -57,6 +57,7 @@ from ultralytics.nn.modules import (
     FusionAFF, # Add new
     FusionRectify, # Add new
     FusionDeformRectify, #Add new
+    FusionCrossCBAM, #add new
     Index,
     LRPCHead,
     Pose,
@@ -158,35 +159,47 @@ class BaseModel(torch.nn.Module):
             return self._predict_augment(x)
         return self._predict_once(x, profile, visualize, embed)
 
+    
     def _predict_once(self, x, profile=False, visualize=False, embed=None):
-        """Perform a forward pass through the network.
-
-        Args:
-            x (torch.Tensor): The input tensor to the model.
-            profile (bool): Print the computation time of each layer if True.
-            visualize (bool): Save the feature maps of the model if True.
-            embed (list, optional): A list of feature vectors/embeddings to return.
-
-        Returns:
-            (torch.Tensor): The last output of the model.
-        """
+        """Perform a forward pass through the network."""
         y, dt, embeddings = [], [], []  # outputs
         embed = frozenset(embed) if embed is not None else {-1}
         max_idx = max(embed)
+        
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
+            
             if profile:
                 self._profile_one_layer(m, x, dt)
+
+            # ==========================================================
+            # [Add new] PATCH CHO EXP 11 DUAL-BACKBONE
+            # Tự động tách kênh từ InputContainer (Layer 0)
+            # ==========================================================
+            if isinstance(x, list) and len(x) == 2:
+                # Nếu đây là Layer 1 (Đầu nhánh RGB) -> Lấy phần tử 0
+                if m.i == 1:
+                    x = x[0]
+                # Nếu đây là Layer 11 (Đầu nhánh NIR) -> Lấy phần tử 1
+                elif m.i == 11:
+                    x = x[1]
+            # ==========================================================
+
             x = m(x)  # run
+            
             y.append(x if m.i in self.save else None)  # save output
+            
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
+            
             if m.i in embed:
                 embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
                 if m.i == max_idx:
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
+        
         return x
+    
 
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference."""
@@ -1488,17 +1501,7 @@ def load_checkpoint(weight, device=None, inplace=True, fuse=False):
 
 
 def parse_model(d, ch, verbose=True):
-    """Parse a YOLO model.yaml dictionary into a PyTorch model.
-
-    Args:
-        d (dict): Model dictionary.
-        ch (int): Input channels.
-        verbose (bool): Whether to print model details.
-
-    Returns:
-        model (torch.nn.Sequential): PyTorch model.
-        save (list): Sorted list of output layers.
-    """
+    """Parse a YOLO model.yaml dictionary into a PyTorch model."""
     import ast
 
     # Args
@@ -1520,65 +1523,21 @@ def parse_model(d, ch, verbose=True):
 
     if verbose:
         LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
+    
     ch = [ch]
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
+    
+    # Danh sách module cơ bản
     base_modules = frozenset(
         {
-            Classify,
-            Conv,
-            ConvTranspose,
-            GhostConv,
-            Bottleneck,
-            GhostBottleneck,
-            SPP,
-            SPPF,
-            C2fPSA,
-            C2PSA,
-            DWConv,
-            Focus,
-            BottleneckCSP,
-            C1,
-            C2,
-            C2f,
-            C3k2,
-            RepNCSPELAN4,
-            ELAN1,
-            ADown,
-            AConv,
-            SPPELAN,
-            C2fAttn,
-            C3,
-            C3TR,
-            C3Ghost,
-            torch.nn.ConvTranspose2d,
-            DWConvTranspose2d,
-            C3x,
-            RepC3,
-            PSA,
-            SCDown,
-            C2fCIB,
-            A2C2f,
+            Classify, Conv, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF,
+            C2fPSA, C2PSA, DWConv, Focus, BottleneckCSP, C1, C2, C2f, C3k2, RepNCSPELAN4,
+            ELAN1, ADown, AConv, SPPELAN, C2fAttn, C3, C3TR, C3Ghost, torch.nn.ConvTranspose2d,
+            DWConvTranspose2d, C3x, RepC3, PSA, SCDown, C2fCIB, A2C2f,
         }
     )
-    repeat_modules = frozenset(  # modules with 'repeat' arguments
-        {
-            BottleneckCSP,
-            C1,
-            C2,
-            C2f,
-            C3k2,
-            C2fAttn,
-            C3,
-            C3TR,
-            C3Ghost,
-            C3x,
-            RepC3,
-            C2fPSA,
-            C2fCIB,
-            C2PSA,
-            A2C2f,
-        }
-    )
+    repeat_modules = frozenset({BottleneckCSP, C1, C2, C2f, C3k2, C2fAttn, C3, C3TR, C3Ghost, C3x, RepC3, C2fPSA, C2fCIB, C2PSA, A2C2f})
+
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
         m = (
             getattr(torch.nn, m[3:])
@@ -1587,16 +1546,30 @@ def parse_model(d, ch, verbose=True):
             if "torchvision.ops." in m
             else globals()[m]
         )  # get module
+        
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
                     args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
+        
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
+        
         if m in base_modules:
             c1, c2 = ch[f], args[0]
+            
+            # =========================================================
+            # [ PATCH CHO EXP 11 DUAL-BACKBONE ]
+            # Sửa số kênh đầu vào (c1) cho đúng với việc tách RGB/NIR
+            # =========================================================
+            if i == 1:      # Layer 1 (Nhánh RGB) -> Ép nhận 3 kênh
+                c1 = 3
+            elif i == 11:   # Layer 11 (Nhánh NIR) -> Ép nhận 1 kênh
+                c1 = 1
+            # =========================================================
+
             if c2 != nc:  # if c2 != nc (e.g., Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
-            if m is C2fAttn:  # set 1) embed channels and 2) num heads
+            if m is C2fAttn:
                 args[1] = make_divisible(min(args[1], max_channels // 2) * width, 8)
                 args[2] = int(max(round(min(args[2], max_channels // 2 // 32)) * width, 1) if args[2] > 1 else args[2])
 
@@ -1610,17 +1583,18 @@ def parse_model(d, ch, verbose=True):
                     args[3] = True
             if m is A2C2f:
                 legacy = False
-                if scale in "lx":  # for L/X sizes
+                if scale in "lx":
                     args.extend((True, 1.2))
             if m is C2fCIB:
                 legacy = False
+
         elif m is AIFI:
             args = [ch[f], *args]
         elif m in frozenset({HGStem, HGBlock}):
             c1, cm, c2 = ch[f], args[0], args[1]
             args = [c1, cm, c2, *args[2:]]
             if m is HGBlock:
-                args.insert(4, n)  # number of repeats
+                args.insert(4, n)
                 n = 1
         elif m is ResNetLayer:
             c2 = args[1] if args[3] else args[1] * 4
@@ -1628,15 +1602,13 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in frozenset(
-            {Detect, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect}
-        ):
+        elif m in frozenset({Detect, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect}):
             args.append([ch[x] for x in f])
             if m is Segment or m is YOLOESegment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
             if m in {Detect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB}:
                 m.legacy = legacy
-        elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
+        elif m is RTDETRDecoder:
             args.insert(1, [ch[x] for x in f])
         elif m is CBLinear:
             c2 = args[0]
@@ -1649,33 +1621,33 @@ def parse_model(d, ch, verbose=True):
             c1 = ch[f]
             args = [*args[1:]]
         
-        # === NEW ===
-        elif m in {InputContainer, FusionAdd, FusionAFF, FusionRectify, FusionDeformRectify}: 
+        # =========================================================
+        # [ MODULE FUSION MỚI 
+        # =========================================================
+        elif m in {FusionAdd, FusionRectify, FusionDeformRectify, FusionCrossCBAM}: 
             if isinstance(f, list):
                 c2 = ch[f[0]]
             else:
                 c2 = ch[f]
-
-            # Logic truyền tham số args:
-            # FusionAFF và FusionRectify cần biết số kênh (c2) để tạo Conv2d
-            if m in {FusionAFF, FusionRectify, FusionDeformRectify}: 
+            
+            # Logic args
+            if m in {FusionRectify, FusionDeformRectify, FusionCrossCBAM}:
                 args = [c2]
-            # InputContainer và FusionAdd (cộng thô) không cần tham số channels
             else:
-                args = [c2, c2] 
-        # =====================================
+                args = [c2, c2]
+        # =========================================================
 
         else:
             c2 = ch[f]
 
-        # Khởi tạo module thực tế
-        m_ = torch.nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
-        t = str(m)[8:-2].replace("__main__.", "")  # module type
-        m_.np = sum(x.numel() for x in m_.parameters())  # number params
-        m_.i, m_.f, m_.type = i, f, t  # attach index, 'from' index, type
+        # Khởi tạo module
+        m_ = torch.nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)
+        t = str(m)[8:-2].replace("__main__.", "")
+        m_.np = sum(x.numel() for x in m_.parameters())
+        m_.i, m_.f, m_.type = i, f, t
         if verbose:
-            LOGGER.info(f"{i:>3}{f!s:>20}{n_:>3}{m_.np:10.0f}  {t:<45}{args!s:<30}")  # print
-        save.extend(x % i for x in ([f] if isinstance(f, int) else f) if x != -1)  # append to savelist
+            LOGGER.info(f"{i:>3}{f!s:>20}{n_:>3}{m_.np:10.0f}  {t:<45}{args!s:<30}")
+        save.extend(x % i for x in ([f] if isinstance(f, int) else f) if x != -1)
         layers.append(m_)
         if i == 0:
             ch = []
