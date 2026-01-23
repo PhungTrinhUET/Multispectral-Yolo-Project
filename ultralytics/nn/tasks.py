@@ -58,6 +58,7 @@ from ultralytics.nn.modules import (
     FusionRectify, # Add new
     FusionDeformRectify, #Add new
     FusionCrossCBAM, #add new
+    FusionRectifyFeedback, #Add new
     Index,
     LRPCHead,
     Pose,
@@ -161,43 +162,55 @@ class BaseModel(torch.nn.Module):
 
     
     def _predict_once(self, x, profile=False, visualize=False, embed=None):
-        """Perform a forward pass through the network."""
-        y, dt, embeddings = [], [], []  # outputs
+        """
+        Perform a forward pass through the network.
+        FIXED FOR EXP 12: Dual-Stream Rectified Feedback
+        """
+        y, dt, embeddings = [], [], []
         embed = frozenset(embed) if embed is not None else {-1}
         max_idx = max(embed)
-        
+
         for m in self.model:
-            if m.f != -1:  # if not from previous layer
-                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
+            # 1. Chuẩn bị Input (x) cho layer hiện tại (m)
+            if m.f != -1:
+                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
             
             if profile:
                 self._profile_one_layer(m, x, dt)
 
             # ==========================================================
-            # [Add new] PATCH CHO EXP 11 DUAL-BACKBONE
-            # Tự động tách kênh từ InputContainer (Layer 0)
+            # [PATCH EXP 12] LOGIC TÁCH DÒNG CHẢY (SELECTOR)
+            # Chỉ can thiệp nếu input là List (Dual-Stream) VÀ không phải là Concat/Fusion
             # ==========================================================
             if isinstance(x, list) and len(x) == 2:
-                # Nếu đây là Layer 1 (Đầu nhánh RGB) -> Lấy phần tử 0
-                if m.i == 1:
-                    x = x[0]
-                # Nếu đây là Layer 11 (Đầu nhánh NIR) -> Lấy phần tử 1
-                elif m.i == 11:
-                    x = x[1]
+                # Lấy tên class của layer để kiểm tra
+                m_type = str(type(m))
+                
+                # CHỈ xử lý nếu layer là Conv (Selector), KHÔNG xử lý Concat hay Fusion
+                if 'Concat' not in m_type and 'Fusion' not in m_type:
+                    # Danh sách các Layer Selector của nhánh RGB (Lấy phần tử 0)
+                    # 1: Stem RGB, 13: P3 RGB, 21: P4 RGB
+                    if m.i in [1, 13, 21]: 
+                        x = x[0]
+                    
+                    # Danh sách các Layer Selector của nhánh NIR (Lấy phần tử 1)
+                    # 4: Stem NIR, 14: P3 NIR, 22: P4 NIR
+                    elif m.i in [4, 14, 22]:
+                        x = x[1]
             # ==========================================================
 
-            x = m(x)  # run
+            # 2. Chạy Layer
+            x = m(x)
             
-            y.append(x if m.i in self.save else None)  # save output
-            
+            # 3. Lưu Output vào Cache (y)
+            y.append(x if m.i in self.save else None)
+
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
-            
             if m.i in embed:
-                embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
+                embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))
                 if m.i == max_idx:
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
-        
         return x
     
 
@@ -1563,7 +1576,7 @@ def parse_model(d, ch, verbose=True):
             # =========================================================
             if i == 1:      # Layer 1 (Nhánh RGB) -> Ép nhận 3 kênh
                 c1 = 3
-            elif i == 11:   # Layer 11 (Nhánh NIR) -> Ép nhận 1 kênh
+            elif i == 4:   # Layer 4 (Nhánh NIR) -> Ép nhận 1 kênh
                 c1 = 1
             # =========================================================
 
@@ -1624,14 +1637,14 @@ def parse_model(d, ch, verbose=True):
         # =========================================================
         # [ MODULE FUSION MỚI 
         # =========================================================
-        elif m in {FusionAdd, FusionRectify, FusionDeformRectify, FusionCrossCBAM}: 
+        elif m in {FusionAdd, FusionRectify, FusionDeformRectify, FusionCrossCBAM, FusionRectifyFeedback}:
             if isinstance(f, list):
                 c2 = ch[f[0]]
             else:
                 c2 = ch[f]
             
             # Logic args
-            if m in {FusionRectify, FusionDeformRectify, FusionCrossCBAM}:
+            if m in {FusionRectify, FusionDeformRectify, FusionCrossCBAM, FusionRectifyFeedback}: # <--- THÊM VÀO ĐÂY
                 args = [c2]
             else:
                 args = [c2, c2]

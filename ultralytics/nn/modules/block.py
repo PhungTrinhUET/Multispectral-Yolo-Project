@@ -2224,3 +2224,54 @@ class FusionCrossCBAM(nn.Module):
         
         # Trộn đều bằng Conv 1x1
         return self.act(self.bn(self.conv_out(fused)))
+    
+class FusionRectifyFeedback(nn.Module):
+    """
+    EXP 12: Rectified Interaction Block
+    Kết hợp:
+    1. Logic Rectify (Exp 9): Dùng nhánh này sửa nhánh kia bằng cổng Sigmoid.
+    2. Cấu trúc Feedback Backbone: Nằm giữa Backbone, trả về [RGB_New, NIR_New].
+    """
+    def __init__(self, channels):
+        super().__init__()
+        # Giảm số kênh nội bộ để nhẹ bớt (Lightweight)
+        inter_channels = channels // 2
+        
+        # --- Nhánh 1: Dùng NIR để soi và sửa lỗi cho RGB ---
+        # RGB Input -> (Nhìn NIR) -> Tạo Mask -> Sửa RGB
+        self.rectify_rgb = nn.Sequential(
+            nn.Conv2d(channels, inter_channels, 1, bias=False),
+            nn.BatchNorm2d(inter_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inter_channels, channels, 1, bias=False),
+            nn.Sigmoid()
+        )
+        
+        # --- Nhánh 2: Dùng RGB để soi và sửa lỗi cho NIR ---
+        self.rectify_nir = nn.Sequential(
+            nn.Conv2d(channels, inter_channels, 1, bias=False),
+            nn.BatchNorm2d(inter_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inter_channels, channels, 1, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        # Input x là list [rgb, nir] từ Backbone truyền vào
+        rgb, nir = x[0], x[1]
+        
+        # 1. Tính toán "Cổng sửa lỗi" (Correction Gates)
+        # Nhánh RGB nhìn sang NIR để xem mình cần sửa gì
+        rgb_gate = self.rectify_rgb(nir) 
+        
+        # Nhánh NIR nhìn sang RGB
+        nir_gate = self.rectify_nir(rgb)
+        
+        # 2. Áp dụng sửa lỗi (Injection)
+        # Công thức: Feature_Mới = Feature_Cũ + (Feature_Cũ * Gate)
+        # (Giữ lại cái gốc + Bổ sung cái đã được chỉnh sửa)
+        rgb_new = rgb + rgb * rgb_gate
+        nir_new = nir + nir * nir_gate
+        
+        # Trả về list 2 nhánh đã được cường hóa để đi tiếp xuống tầng sau
+        return [rgb_new, nir_new]
