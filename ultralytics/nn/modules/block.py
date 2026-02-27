@@ -11,7 +11,6 @@ from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
-from torchvision.ops import DeformConv2d # <--- NEW, Import DCN 
 
 __all__ = (
     "C1",
@@ -1946,6 +1945,8 @@ class SAVPE(nn.Module):
         aggregated = score.transpose(-2, -3) @ x.reshape(B, self.c, C // self.c, -1).transpose(-1, -2)
 
         return F.normalize(aggregated.transpose(-2, -3).reshape(B, Q, -1), dim=-1, p=2)
+
+
 """
 class InputContainer(nn.Module):
     def __init__(self, c1, c2):
@@ -1956,11 +1957,11 @@ class InputContainer(nn.Module):
         return x  # Trả về Input gốc
 """
 
+
 class InputContainer(nn.Module):
+    """Module tách kênh an toàn. Hỗ trợ cả trường hợp dummy input (ch=3) lúc khởi tạo model.
     """
-    Module tách kênh an toàn.
-    Hỗ trợ cả trường hợp dummy input (ch=3) lúc khởi tạo model.
-    """
+
     def __init__(self, c1=4, c2=4):
         super().__init__()
 
@@ -1972,30 +1973,31 @@ class InputContainer(nn.Module):
             nir = torch.zeros_like(x[:, 0:1, ...])
         else:
             # Lấy kênh thứ 4 (NIR) chuẩn
-            nir = x[:, 3:4, ...] 
-            
+            nir = x[:, 3:4, ...]
+
         # Trả về [RGB (3 kênh), NIR (1 kênh)]
         return [x[:, :3, ...], nir]
-    
+
+
 # FusionAdd method
 class FusionAdd(nn.Module):
+    """Cộng element-wise 2 feature maps: Input = [x1, x2]. Output = x1 + x2. Yêu cầu: x1 và x2 phải cùng kích thước
+    (Channels, H, W).
     """
-    Cộng element-wise 2 feature maps: Input = [x1, x2]. Output = x1 + x2.
-    Yêu cầu: x1 và x2 phải cùng kích thước (Channels, H, W).
-    """
+
     def __init__(self, c1, c2):
         super().__init__()
-    
+
     def forward(self, x):
         # x là list gồm [input1, input2]
         return x[0] + x[1]
-    
+
+
 # Fusion AFF (Agrifusion)
 class FusionAFF(nn.Module):
+    """FIXED VERSION: Uses GroupNorm (LayerNorm style) for Global Branch to handle batch_size=1 cases.
     """
-    FIXED VERSION: Uses GroupNorm (LayerNorm style) for Global Branch 
-    to handle batch_size=1 cases.
-    """
+
     def __init__(self, channels, r=4):
         super().__init__()
         inter_channels = int(channels / r)
@@ -2013,10 +2015,10 @@ class FusionAFF(nn.Module):
         self.global_att = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(channels, inter_channels, kernel_size=1, stride=1, padding=0),
-            nn.GroupNorm(1, inter_channels), # Fix lỗi Batch=1
+            nn.GroupNorm(1, inter_channels),  # Fix lỗi Batch=1
             nn.ReLU(inplace=True),
             nn.Conv2d(inter_channels, channels, kernel_size=1, stride=1, padding=0),
-            nn.GroupNorm(1, channels),       # Fix lỗi Batch=1
+            nn.GroupNorm(1, channels),  # Fix lỗi Batch=1
         )
 
         self.sigmoid = nn.Sigmoid()
@@ -2028,92 +2030,90 @@ class FusionAFF(nn.Module):
         xg = self.global_att(xa)
         weights = self.sigmoid(xl + xg)
         return 2.0 * (weights * rgb + (1.0 - weights) * nir)
-    
-class FusionRectify(nn.Module):
-    """
-    PAPER: CMX: Cross-Modal Fusion for RGB-X Semantic Segmentation With Transformers
-    https://ieeexplore.ieee.org/document/10231003
 
-    Simplified Cross-Modal Feature Rectification Module (CMX Style).
-    Mục tiêu: Dùng đặc trưng của RGB để hiệu chỉnh NIR và ngược lại.
-    Công thức: 
+
+class FusionRectify(nn.Module):
+    """PAPER: CMX: Cross-Modal Fusion for RGB-X Semantic Segmentation With Transformers
+    https://ieeexplore.ieee.org/document/10231003.
+
+    Simplified Cross-Modal Feature Rectification Module (CMX Style). Mục tiêu: Dùng đặc trưng của RGB để hiệu chỉnh NIR
+    và ngược lại. Công thức:
         F_rgb' = F_rgb + F_rgb * Sigmoid(Conv(F_nir))
         F_nir' = F_nir + F_nir * Sigmoid(Conv(F_rgb))
         Output = F_rgb' + F_nir'
     """
+
     def __init__(self, channels):
         super().__init__()
         # Giảm số kênh 4 lần ở lớp trung gian để nhẹ (Bottleneck factor = 4)
         inter_channels = channels // 4
-        
+
         # Nhánh hiệu chỉnh cho RGB (Nhìn NIR để sửa RGB)
         self.rectify_rgb = nn.Sequential(
             nn.Conv2d(channels, inter_channels, 1, 1, 0, bias=False),
             nn.BatchNorm2d(inter_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(inter_channels, channels, 1, 1, 0, bias=False),
-            nn.Sigmoid() # Trả về trọng số từ 0 đến 1
+            nn.Sigmoid(),  # Trả về trọng số từ 0 đến 1
         )
-        
+
         # Nhánh hiệu chỉnh cho NIR (Nhìn RGB để sửa NIR)
         self.rectify_nir = nn.Sequential(
             nn.Conv2d(channels, inter_channels, 1, 1, 0, bias=False),
             nn.BatchNorm2d(inter_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(inter_channels, channels, 1, 1, 0, bias=False),
-            nn.Sigmoid()
+            nn.Sigmoid(),
         )
 
     def forward(self, x):
         # x là list [rgb, nir]
         rgb, nir = x[0], x[1]
-        
-        # 1. Hiệu chỉnh RGB: 
+
+        # 1. Hiệu chỉnh RGB:
         # "Cộng thêm vào RGB một lượng thông tin được điều phối bởi NIR"
         rgb_rectified = rgb + rgb * self.rectify_rgb(nir)
-        
+
         # 2. Hiệu chỉnh NIR:
         # "Cộng thêm vào NIR một lượng thông tin được điều phối bởi RGB"
         nir_rectified = nir + nir * self.rectify_nir(rgb)
-        
+
         # 3. Cộng lại (Feature Aggregation)
         return rgb_rectified + nir_rectified
-    
+
 
 class FusionDeformRectify(nn.Module):
+    """ULTIMATE FUSION (STABLE VERSION): - Alignment: Dùng Conv2d thường (Implicit Alignment) thay cho DCN để tránh lỗi
+    SegFault. - Rectification: CMX Block. - Attention: ECA Block.
     """
-    ULTIMATE FUSION (STABLE VERSION): 
-    - Alignment: Dùng Conv2d thường (Implicit Alignment) thay cho DCN để tránh lỗi SegFault.
-    - Rectification: CMX Block.
-    - Attention: ECA Block.
-    """
+
     def __init__(self, channels):
         super().__init__()
         inter_channels = channels // 4
-        
+
         # === 1. ALIGNMENT BLOCK (SAFE) ===
         # Thay DCN bằng Conv 3x3 để học cách căn chỉnh đặc trưng
         # Đây gọi là "Learnable Rigid Alignment"
         self.align_rgb = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
         self.align_nir = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        
+
         # === 2. CMX RECTIFICATION BLOCK (Giữ nguyên) ===
         self.rectify_rgb = nn.Sequential(
             nn.Conv2d(channels, inter_channels, 1, bias=False),
             nn.BatchNorm2d(inter_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(inter_channels, channels, 1, bias=False),
-            nn.Sigmoid()
+            nn.Sigmoid(),
         )
-        
+
         self.rectify_nir = nn.Sequential(
             nn.Conv2d(channels, inter_channels, 1, bias=False),
             nn.BatchNorm2d(inter_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(inter_channels, channels, 1, bias=False),
-            nn.Sigmoid()
+            nn.Sigmoid(),
         )
-        
+
         # === 3. ECA ATTENTION BLOCK (Giữ nguyên) ===
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.conv_eca = nn.Conv1d(1, 1, kernel_size=3, padding=1, bias=False)
@@ -2121,7 +2121,7 @@ class FusionDeformRectify(nn.Module):
 
     def forward(self, x):
         rgb, nir = x[0], x[1]
-        
+
         # --- BƯỚC 1: ALIGNMENT ---
         # Dùng Conv thường để căn chỉnh (Robust & Fast)
         rgb_aligned = self.align_rgb(rgb)
@@ -2130,29 +2130,31 @@ class FusionDeformRectify(nn.Module):
         # --- BƯỚC 2: RECTIFICATION ---
         rgb_rectified = rgb_aligned + rgb_aligned * self.rectify_rgb(nir_aligned)
         nir_rectified = nir_aligned + nir_aligned * self.rectify_nir(rgb_aligned)
-        
+
         fused = rgb_rectified + nir_rectified
-        
+
         # --- BƯỚC 3: SELECTION ---
-        b, c, h, w = fused.size()
+        b, c, _h, _w = fused.size()
         y = self.avg_pool(fused).view(b, 1, c)
         y = self.conv_eca(y)
         y = self.sigmoid(y).view(b, c, 1, 1)
-        
+
         return fused * y
-    
+
+
 # --- Thêm vào ultralytics/nn/modules/block.py ---
 
+
 class SpatialAttention(nn.Module):
+    """Module con: Spatial Attention (Lấy cảm hứng từ bài báo CBAM) Mục tiêu: Tìm ra "ĐÂU LÀ VỊ TRÍ QUAN TRỌNG?" trong
+    bức ảnh.
     """
-    Module con: Spatial Attention (Lấy cảm hứng từ bài báo CBAM)
-    Mục tiêu: Tìm ra "ĐÂU LÀ VỊ TRÍ QUAN TRỌNG?" trong bức ảnh.
-    """
+
     def __init__(self, kernel_size=7):
         super().__init__()
         # Kernel 7x7 giúp nhìn vùng rộng hơn (receptive field lớn)
         # Input channel = 2 (Do gộp MaxPool và AvgPool) -> Output channel = 1 (Spatial Map)
-        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size//2, bias=False)
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size // 2, bias=False)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
@@ -2165,18 +2167,20 @@ class SpatialAttention(nn.Module):
         # 4. Conv + Sigmoid -> Bản đồ nhiệt (0..1)
         return self.sigmoid(self.conv(x))
 
+
 # --- DÁN VÀO CUỐI FILE ultralytics/nn/modules/block.py ---
 
+
 class SpatialAttention(nn.Module):
+    """Module phụ: Spatial Attention (Lấy cảm hứng từ CBAM) Mục tiêu: Tạo bản đồ nhiệt (Heatmap) để biết vị trí nào quan
+    trọng.
     """
-    Module phụ: Spatial Attention (Lấy cảm hứng từ CBAM)
-    Mục tiêu: Tạo bản đồ nhiệt (Heatmap) để biết vị trí nào quan trọng.
-    """
+
     def __init__(self, kernel_size=7):
         super().__init__()
         # Kernel 7x7 giúp nhìn vùng rộng (Receptive Field lớn)
         # Input channel = 2 (Do gộp MaxPool và AvgPool) -> Output channel = 1
-        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size//2, bias=False)
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size // 2, bias=False)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
@@ -2189,16 +2193,16 @@ class SpatialAttention(nn.Module):
         # 4. Conv + Sigmoid -> Bản đồ nhiệt [0..1]
         return self.sigmoid(self.conv(x))
 
+
 class FusionCrossCBAM(nn.Module):
-    """
-    EXP 11: CROSS-MODAL SPATIAL ATTENTION
-    """
+    """EXP 11: CROSS-MODAL SPATIAL ATTENTION."""
+
     def __init__(self, channels):
         super().__init__()
         # Module Spatial Attention riêng cho từng nhánh
         self.sa_rgb = SpatialAttention(kernel_size=7)
         self.sa_nir = SpatialAttention(kernel_size=7)
-        
+
         # Lớp gộp cuối cùng: Conv 1x1 để trộn đặc trưng sau khi fusion
         self.conv_out = nn.Conv2d(channels, channels, kernel_size=1)
         self.bn = nn.BatchNorm2d(channels)
@@ -2206,37 +2210,36 @@ class FusionCrossCBAM(nn.Module):
 
     def forward(self, x):
         rgb, nir = x[0], x[1]
-        
+
         # === BƯỚC 1: TẠO BATTENTION MAPS ===
-        nir_map = self.sa_nir(nir) 
-        
+        nir_map = self.sa_nir(nir)
+
         rgb_map = self.sa_rgb(rgb)
-        
+
         # === BƯỚC 2: CROSS ENHANCEMENT ===
         # Công thức: Original + (Original * AttentionMap)
         rgb_enhanced = rgb + (rgb * nir_map)
-        
+
         # Áp bản đồ RGB lên NIR
         nir_enhanced = nir + (nir * rgb_map)
-        
+
         # === BƯỚC 3: GỘP (FUSION) ===
         fused = rgb_enhanced + nir_enhanced
-        
+
         # Trộn đều bằng Conv 1x1
         return self.act(self.bn(self.conv_out(fused)))
-    
+
+
 class FusionRectifyFeedback(nn.Module):
+    """EXP 12: Rectified Interaction Block Kết hợp: 1. Logic Rectify (Exp 9): Dùng nhánh này sửa nhánh kia bằng cổng
+    Sigmoid. 2. Cấu trúc Feedback Backbone: Nằm giữa Backbone, trả về [RGB_New, NIR_New].
     """
-    EXP 12: Rectified Interaction Block
-    Kết hợp:
-    1. Logic Rectify (Exp 9): Dùng nhánh này sửa nhánh kia bằng cổng Sigmoid.
-    2. Cấu trúc Feedback Backbone: Nằm giữa Backbone, trả về [RGB_New, NIR_New].
-    """
+
     def __init__(self, channels):
         super().__init__()
         # Giảm số kênh nội bộ để nhẹ bớt (Lightweight)
         inter_channels = channels // 2
-        
+
         # --- Nhánh 1: Dùng NIR để soi và sửa lỗi cho RGB ---
         # RGB Input -> (Nhìn NIR) -> Tạo Mask -> Sửa RGB
         self.rectify_rgb = nn.Sequential(
@@ -2244,34 +2247,34 @@ class FusionRectifyFeedback(nn.Module):
             nn.BatchNorm2d(inter_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(inter_channels, channels, 1, bias=False),
-            nn.Sigmoid()
+            nn.Sigmoid(),
         )
-        
+
         # --- Nhánh 2: Dùng RGB để soi và sửa lỗi cho NIR ---
         self.rectify_nir = nn.Sequential(
             nn.Conv2d(channels, inter_channels, 1, bias=False),
             nn.BatchNorm2d(inter_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(inter_channels, channels, 1, bias=False),
-            nn.Sigmoid()
+            nn.Sigmoid(),
         )
 
     def forward(self, x):
         # Input x là list [rgb, nir] từ Backbone truyền vào
         rgb, nir = x[0], x[1]
-        
+
         # 1. Tính toán "Cổng sửa lỗi" (Correction Gates)
         # Nhánh RGB nhìn sang NIR để xem mình cần sửa gì
-        rgb_gate = self.rectify_rgb(nir) 
-        
+        rgb_gate = self.rectify_rgb(nir)
+
         # Nhánh NIR nhìn sang RGB
         nir_gate = self.rectify_nir(rgb)
-        
+
         # 2. Áp dụng sửa lỗi (Injection)
         # Công thức: Feature_Mới = Feature_Cũ + (Feature_Cũ * Gate)
         # (Giữ lại cái gốc + Bổ sung cái đã được chỉnh sửa)
         rgb_new = rgb + rgb * rgb_gate
         nir_new = nir + nir * nir_gate
-        
+
         # Trả về list 2 nhánh đã được cường hóa để đi tiếp xuống tầng sau
         return [rgb_new, nir_new]
