@@ -31,13 +31,6 @@ from .block import (
     SPPELAN,
     SPPF,
     A2C2f,
-    InputContainer,  # <--- NEW
-    FusionAdd, # NEW
-    FusionAFF, # NEW
-    FusionRectify, #NEW
-    FusionDeformRectify, #Add new
-    FusionCrossCBAM, # Add new
-    FusionRectifyFeedback, #Add new
     AConv,
     ADown,
     Attention,
@@ -54,10 +47,17 @@ from .block import (
     CBFuse,
     CBLinear,
     ContrastiveHead,
+    FusionAdd,  # NEW
+    FusionAFF,  # NEW
+    FusionCrossCBAM,  # Add new
+    FusionDeformRectify,  # Add new
+    FusionRectify,  # NEW
+    FusionRectifyFeedback,  # Add new
     GhostBottleneck,
     HGBlock,
     HGStem,
     ImagePoolingAttn,
+    InputContainer,  # <--- NEW
     MaxSigmoidAttnBlock,
     Proto,
     RepC3,
@@ -176,13 +176,13 @@ __all__ = (
     "RepVGGDW",
     "ResNetLayer",
     "SCDown",
-    "InputContainer", # MỚI
-    "FusionAdd", # MỚI
-    "FusionAFF", # MỚI 
-    "FusionRectify", #MỚI
-    "FusionDeformRectify" #NEW
-    "FusionCrossCBAM" #NEW
-    "FusionRectifyFeedback" #New
+    "InputContainer",  # MỚI
+    "FusionAdd",  # MỚI
+    "FusionAFF",  # MỚI
+    "FusionRectify",  # MỚI
+    "FusionDeformRectify"  # NEW
+    "FusionCrossCBAM"  # NEW
+    "FusionRectifyFeedback"  # New
     "Segment",
     "SpatialAttention",
     "TorchVision",
