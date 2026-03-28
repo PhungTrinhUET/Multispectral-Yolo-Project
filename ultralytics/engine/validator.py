@@ -192,7 +192,6 @@ class BaseValidator:
             # Fix cứng cho 4 kênh
             model.warmup(imgsz=(1 if pt else self.args.batch, 4, imgsz, imgsz))
 
-
         self.run_callbacks("on_val_start")
         dt = (
             Profile(device=self.device),

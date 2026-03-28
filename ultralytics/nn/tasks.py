@@ -47,18 +47,16 @@ from ultralytics.nn.modules import (
     DWConv,
     DWConvTranspose2d,
     Focus,
+    FusionAdd,  # Add new
+    FusionCrossCBAM,  # add new
+    FusionDeformRectify,  # Add new
+    FusionRectify,  # Add new
+    FusionRectifyFeedback,  # Add new
     GhostBottleneck,
     GhostConv,
     HGBlock,
     HGStem,
     ImagePoolingAttn,
-    InputContainer, #Add new
-    FusionAdd, #Add new
-    FusionAFF, # Add new
-    FusionRectify, # Add new
-    FusionDeformRectify, #Add new
-    FusionCrossCBAM, #add new
-    FusionRectifyFeedback, #Add new
     Index,
     LRPCHead,
     Pose,
@@ -160,11 +158,8 @@ class BaseModel(torch.nn.Module):
             return self._predict_augment(x)
         return self._predict_once(x, profile, visualize, embed)
 
-    
     def _predict_once(self, x, profile=False, visualize=False, embed=None):
-        """
-        Perform a forward pass through the network.
-        FIXED FOR EXP 12: Dual-Stream Rectified Feedback
+        """Perform a forward pass through the network. FIXED FOR EXP 12: Dual-Stream Rectified Feedback.
         """
         y, dt, embeddings = [], [], []
         embed = frozenset(embed) if embed is not None else {-1}
@@ -174,7 +169,7 @@ class BaseModel(torch.nn.Module):
             # 1. Chuẩn bị Input (x) cho layer hiện tại (m)
             if m.f != -1:
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
-            
+
             if profile:
                 self._profile_one_layer(m, x, dt)
 
@@ -185,14 +180,14 @@ class BaseModel(torch.nn.Module):
             if isinstance(x, list) and len(x) == 2:
                 # Lấy tên class của layer để kiểm tra
                 m_type = str(type(m))
-                
+
                 # CHỈ xử lý nếu layer là Conv (Selector), KHÔNG xử lý Concat hay Fusion
-                if 'Concat' not in m_type and 'Fusion' not in m_type:
+                if "Concat" not in m_type and "Fusion" not in m_type:
                     # Danh sách các Layer Selector của nhánh RGB (Lấy phần tử 0)
                     # 1: Stem RGB, 13: P3 RGB, 21: P4 RGB
-                    if m.i in [1, 13, 21]: 
+                    if m.i in [1, 13, 21]:
                         x = x[0]
-                    
+
                     # Danh sách các Layer Selector của nhánh NIR (Lấy phần tử 1)
                     # 4: Stem NIR, 14: P3 NIR, 22: P4 NIR
                     elif m.i in [4, 14, 22]:
@@ -201,7 +196,7 @@ class BaseModel(torch.nn.Module):
 
             # 2. Chạy Layer
             x = m(x)
-            
+
             # 3. Lưu Output vào Cache (y)
             y.append(x if m.i in self.save else None)
 
@@ -212,7 +207,6 @@ class BaseModel(torch.nn.Module):
                 if m.i == max_idx:
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
         return x
-    
 
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference."""
@@ -1536,20 +1530,52 @@ def parse_model(d, ch, verbose=True):
 
     if verbose:
         LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
-    
+
     ch = [ch]
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
-    
+
     # Danh sách module cơ bản
     base_modules = frozenset(
         {
-            Classify, Conv, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF,
-            C2fPSA, C2PSA, DWConv, Focus, BottleneckCSP, C1, C2, C2f, C3k2, RepNCSPELAN4,
-            ELAN1, ADown, AConv, SPPELAN, C2fAttn, C3, C3TR, C3Ghost, torch.nn.ConvTranspose2d,
-            DWConvTranspose2d, C3x, RepC3, PSA, SCDown, C2fCIB, A2C2f,
+            Classify,
+            Conv,
+            ConvTranspose,
+            GhostConv,
+            Bottleneck,
+            GhostBottleneck,
+            SPP,
+            SPPF,
+            C2fPSA,
+            C2PSA,
+            DWConv,
+            Focus,
+            BottleneckCSP,
+            C1,
+            C2,
+            C2f,
+            C3k2,
+            RepNCSPELAN4,
+            ELAN1,
+            ADown,
+            AConv,
+            SPPELAN,
+            C2fAttn,
+            C3,
+            C3TR,
+            C3Ghost,
+            torch.nn.ConvTranspose2d,
+            DWConvTranspose2d,
+            C3x,
+            RepC3,
+            PSA,
+            SCDown,
+            C2fCIB,
+            A2C2f,
         }
     )
-    repeat_modules = frozenset({BottleneckCSP, C1, C2, C2f, C3k2, C2fAttn, C3, C3TR, C3Ghost, C3x, RepC3, C2fPSA, C2fCIB, C2PSA, A2C2f})
+    repeat_modules = frozenset(
+        {BottleneckCSP, C1, C2, C2f, C3k2, C2fAttn, C3, C3TR, C3Ghost, C3x, RepC3, C2fPSA, C2fCIB, C2PSA, A2C2f}
+    )
 
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
         m = (
@@ -1559,24 +1585,24 @@ def parse_model(d, ch, verbose=True):
             if "torchvision.ops." in m
             else globals()[m]
         )  # get module
-        
+
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
                     args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
-        
+
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
-        
+
         if m in base_modules:
             c1, c2 = ch[f], args[0]
-            
+
             # =========================================================
             # [ PATCH CHO EXP 11 DUAL-BACKBONE ]
             # Sửa số kênh đầu vào (c1) cho đúng với việc tách RGB/NIR
             # =========================================================
-            if i == 1:      # Layer 1 (Nhánh RGB) -> Ép nhận 3 kênh
+            if i == 1:  # Layer 1 (Nhánh RGB) -> Ép nhận 3 kênh
                 c1 = 3
-            elif i == 4:   # Layer 4 (Nhánh NIR) -> Ép nhận 1 kênh
+            elif i == 4:  # Layer 4 (Nhánh NIR) -> Ép nhận 1 kênh
                 c1 = 1
             # =========================================================
 
@@ -1615,7 +1641,9 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in frozenset({Detect, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect}):
+        elif m in frozenset(
+            {Detect, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect}
+        ):
             args.append([ch[x] for x in f])
             if m is Segment or m is YOLOESegment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
@@ -1633,18 +1661,18 @@ def parse_model(d, ch, verbose=True):
             c2 = args[0]
             c1 = ch[f]
             args = [*args[1:]]
-        
+
         # =========================================================
-        # [ MODULE FUSION MỚI 
+        # [ MODULE FUSION MỚI
         # =========================================================
         elif m in {FusionAdd, FusionRectify, FusionDeformRectify, FusionCrossCBAM, FusionRectifyFeedback}:
             if isinstance(f, list):
                 c2 = ch[f[0]]
             else:
                 c2 = ch[f]
-            
+
             # Logic args
-            if m in {FusionRectify, FusionDeformRectify, FusionCrossCBAM, FusionRectifyFeedback}: # <--- THÊM VÀO ĐÂY
+            if m in {FusionRectify, FusionDeformRectify, FusionCrossCBAM, FusionRectifyFeedback}:  # <--- THÊM VÀO ĐÂY
                 args = [c2]
             else:
                 args = [c2, c2]
@@ -1665,8 +1693,9 @@ def parse_model(d, ch, verbose=True):
         if i == 0:
             ch = []
         ch.append(c2)
-    
+
     return torch.nn.Sequential(*layers), sorted(save)
+
 
 def yaml_model_load(path):
     """Load a YOLOv8 model from a YAML file.
