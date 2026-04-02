@@ -6,7 +6,7 @@ test: images/test
 
 nc: 4
 
-names: 
+names:
   0: truoc_thu_phan
   1: sau_thu_phan
   2: cay40
