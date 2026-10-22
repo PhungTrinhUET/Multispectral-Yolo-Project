@@ -1990,6 +1990,24 @@ class FusionAdd(nn.Module):
         # x là list gồm [input1, input2]
         return x[0] + x[1]
     
+class FusionConcat(nn.Module):
+    """
+    Neck Concat Fusion: concat [RGB(C), NDVI(C)] → 2C → Conv1x1 → C.
+    Output channel count = C (giống input) để PANet downstream không đổi.
+    """
+    def __init__(self, channels):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Conv2d(2 * channels, channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        rgb, nir = x[0], x[1]
+        return self.proj(torch.cat([rgb, nir], dim=1))
+
+
 # Fusion AFF (Agrifusion)
 class FusionAFF(nn.Module):
     """
@@ -2029,57 +2047,6 @@ class FusionAFF(nn.Module):
         weights = self.sigmoid(xl + xg)
         return 2.0 * (weights * rgb + (1.0 - weights) * nir)
     
-class FusionRectify(nn.Module):
-    """
-    PAPER: CMX: Cross-Modal Fusion for RGB-X Semantic Segmentation With Transformers
-    https://ieeexplore.ieee.org/document/10231003
-
-    Simplified Cross-Modal Feature Rectification Module (CMX Style).
-    Mục tiêu: Dùng đặc trưng của RGB để hiệu chỉnh NIR và ngược lại.
-    Công thức: 
-        F_rgb' = F_rgb + F_rgb * Sigmoid(Conv(F_nir))
-        F_nir' = F_nir + F_nir * Sigmoid(Conv(F_rgb))
-        Output = F_rgb' + F_nir'
-    """
-    def __init__(self, channels):
-        super().__init__()
-        # Giảm số kênh 4 lần ở lớp trung gian để nhẹ (Bottleneck factor = 4)
-        inter_channels = channels // 4
-        
-        # Nhánh hiệu chỉnh cho RGB (Nhìn NIR để sửa RGB)
-        self.rectify_rgb = nn.Sequential(
-            nn.Conv2d(channels, inter_channels, 1, 1, 0, bias=False),
-            nn.BatchNorm2d(inter_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(inter_channels, channels, 1, 1, 0, bias=False),
-            nn.Sigmoid() # Trả về trọng số từ 0 đến 1
-        )
-        
-        # Nhánh hiệu chỉnh cho NIR (Nhìn RGB để sửa NIR)
-        self.rectify_nir = nn.Sequential(
-            nn.Conv2d(channels, inter_channels, 1, 1, 0, bias=False),
-            nn.BatchNorm2d(inter_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(inter_channels, channels, 1, 1, 0, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        # x là list [rgb, nir]
-        rgb, nir = x[0], x[1]
-        
-        # 1. Hiệu chỉnh RGB: 
-        # "Cộng thêm vào RGB một lượng thông tin được điều phối bởi NIR"
-        rgb_rectified = rgb + rgb * self.rectify_rgb(nir)
-        
-        # 2. Hiệu chỉnh NIR:
-        # "Cộng thêm vào NIR một lượng thông tin được điều phối bởi RGB"
-        nir_rectified = nir + nir * self.rectify_nir(rgb)
-        
-        # 3. Cộng lại (Feature Aggregation)
-        return rgb_rectified + nir_rectified
-    
-
 class FusionDeformRectify(nn.Module):
     """
     ULTIMATE FUSION (STABLE VERSION): 
@@ -2275,3 +2242,263 @@ class FusionRectifyFeedback(nn.Module):
         
         # Trả về list 2 nhánh đã được cường hóa để đi tiếp xuống tầng sau
         return [rgb_new, nir_new]
+    
+# --- Dán vào cuối file ultralytics/nn/modules/block.py ---
+
+class FusionModulation(nn.Module):
+    """
+    EXP 13: GMD-YOLO Style - Feature-wise Linear Modulation (FiLM).
+    Cơ chế: Nhánh Phụ (NIR) sinh ra tham số Scale (gamma) và Shift (beta)
+    để điều tiết Nhánh Chính (RGB).
+    Công thức: RGB_out = RGB_in * (1 + gamma(NIR)) + beta(NIR)
+    """
+    def __init__(self, channels):
+        super().__init__()
+        # Mạng nơ-ron nhỏ để sinh tham số điều tiết từ NIR
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        
+        # MLP: Nén xuống -> ReLU -> Phóng to lên 2*C (cho Gamma và Beta)
+        self.fc = nn.Sequential(
+            nn.Conv2d(channels, channels // 2, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels // 2, channels * 2, 1, bias=True) # Output 2*C
+        )
+
+    def forward(self, x):
+        # Input x là list [rgb, nir]
+        if isinstance(x, list):
+            rgb, nir = x[0], x[1]
+        else:
+            return x # Fallback nếu input không phải list
+
+        # 1. Từ NIR, sinh ra vector điều tiết
+        nir_feat = self.gap(nir) # [B, C, 1, 1]
+        params = self.fc(nir_feat) # [B, 2C, 1, 1]
+        
+        # 2. Tách thành Gamma (Scale) và Beta (Shift)
+        gamma, beta = torch.chunk(params, 2, dim=1) # Mỗi cái [B, C, 1, 1]
+        
+        # Dùng Sigmoid cho Gamma (0 -> 1)
+        gamma = torch.sigmoid(gamma)
+        
+        # Dùng Tanh cho Beta (-1 -> 1)
+        beta = torch.tanh(beta)
+        
+        # 3. Điều tiết RGB (Feature Modulation)
+        rgb_out = rgb * (1 + gamma) + beta
+        
+        return rgb_out
+
+class FusionRectify(nn.Module): #version 11/5/2026
+    """
+    CM-FRM (CMX paper): Channel + Spatial cross-modal rectification.
+    RGB_out = RGB + 0.5*(W_c * X) + 0.5*(W_s * X)
+    """
+    def __init__(self, channels):
+        super().__init__()
+        # Channel: AvgPool+MaxPool from both → 4C → MLP → C (for RGB correction)
+        self.channel_mlp = nn.Sequential(
+            nn.Linear(4 * channels, channels),
+            nn.Sigmoid()
+        )
+        # Spatial: concat[RGB, X] → two spatial maps
+        self.spatial_conv = nn.Sequential(
+            nn.Conv2d(2 * channels, 2, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(2, 2, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        rgb, nir = x[0], x[1]
+        
+        # Channel rectification (cross-modal: use nir to create correction for rgb)
+        avg_rgb = rgb.mean(dim=[2, 3])
+        max_rgb = rgb.amax(dim=[2, 3])
+        avg_nir = nir.mean(dim=[2, 3])
+        max_nir = nir.amax(dim=[2, 3])
+        y = torch.cat([avg_rgb, max_rgb, avg_nir, max_nir], dim=1)
+        w_c = self.channel_mlp(y).unsqueeze(-1).unsqueeze(-1)  # [B, C, 1, 1]
+        
+        # Spatial rectification (cross-modal)
+        combined = torch.cat([rgb, nir], dim=1)  # [B, 2C, H, W]
+        ws = self.spatial_conv(combined)          # [B, 2, H, W]
+        w_s_rgb = ws[:, 0:1]                     # [B, 1, H, W]
+        
+        # Additive correction: RGB gets info from NDVI, weighted by cross-modal attention
+        rgb_correction_c = w_c * nir
+        rgb_correction_s = w_s_rgb * nir
+        
+        return rgb + 0.5 * rgb_correction_c + 0.5 * rgb_correction_s
+
+
+class FusionRectifyGated(FusionRectify):
+    """
+    S9 (revision): CM-FRM with a zero-initialised per-channel gate on the NDVI correction (ReZero / LayerScale style).
+    RGB_out = RGB + gamma * (0.5*(W_c * X) + 0.5*(W_s * X)), gamma = 0 at init: the fused model starts as its RGB stream.
+    """
+    def __init__(self, channels):
+        super().__init__(channels)
+        self.gamma = nn.Parameter(torch.zeros(channels))
+
+    def forward(self, x):
+        rgb, nir = x[0], x[1]
+        y = torch.cat([rgb.mean(dim=[2, 3]), rgb.amax(dim=[2, 3]), nir.mean(dim=[2, 3]), nir.amax(dim=[2, 3])], dim=1)
+        w_c = self.channel_mlp(y).unsqueeze(-1).unsqueeze(-1)  # [B, C, 1, 1]
+        w_s = self.spatial_conv(torch.cat([rgb, nir], dim=1))[:, 0:1]  # [B, 1, H, W]
+        return rgb + self.gamma.view(1, -1, 1, 1) * (0.5 * w_c * nir + 0.5 * w_s * nir)
+
+
+class _GLSA(nn.Module):
+    """Global-local synergistic attention (ADMPF, Liu et al., TGRS 2025, Eq.1-6). Returns Att in [0,1], (B,C,H,W)."""
+    def __init__(self, c):
+        super().__init__()
+        self.ch = nn.Conv2d(c, c, (3, 1), padding=(1, 0), groups=c, bias=False)  # Conv3x1 on F_h^avg
+        self.cw = nn.Conv2d(c, c, (1, 3), padding=(0, 1), groups=c, bias=False)  # Conv1x3 on F_w^avg
+        self.cs = nn.Conv2d(2, 1, 3, padding=1, bias=False)                       # Conv3x3 on [max_c, avg_c]
+        self.dsc = nn.Sequential(nn.Conv2d(c, c, 3, padding=1, groups=c, bias=False), nn.Conv2d(c, c, 1),
+                                 nn.Sigmoid())
+
+    def forward(self, f):
+        gh = self.ch(f.mean(3, keepdim=True))  # (B,C,H,1)
+        gw = self.cw(f.mean(2, keepdim=True))  # (B,C,1,W)
+        s = self.cs(torch.cat([f.amax(1, keepdim=True), f.mean(1, keepdim=True)], 1))  # (B,1,H,W)
+        return self.dsc(gw * gh * s)
+
+
+class _FusionBlock(nn.Module):
+    """ADMPF fusion block (Eq.9-10): f' = Conv1x1(Cat(a,b)) + a + b; f = Conv3x3(f') + f'.
+    The 3x3 conv is depthwise-separable (dw3x3 + pw1x1) to keep parameters close to FusionRectify's model size."""
+    def __init__(self, c):
+        super().__init__()
+        self.c1 = Conv(2 * c, c, 1)
+        self.c3 = nn.Sequential(Conv(c, c, 3, g=c), Conv(c, c, 1))
+
+    def forward(self, a, b):
+        f = self.c1(torch.cat([a, b], 1)) + a + b
+        return self.c3(f) + f
+
+
+class FusionComplementary(nn.Module):
+    """GLSA + MCIF + MPFN fusion (ADMPF, Liu et al., TGRS 2025) as a drop-in for FusionRectify.
+    Normal branch fuses GLSA-weighted features; enhanced branch fuses features weighted by the complementary
+    filter Pc = tanh(lambda * Att_self * (1 - Att_other)), then both are fused and refined (Eq.7-19).
+    Output = rgb + MPFN(...), with the last conv's BN zero-initialised so training starts from the pretrained
+    RGB stream (residual injection, same role as FusionRectify's additive correction).
+    """
+    def __init__(self, channels, lam=2.0):
+        super().__init__()
+        c = channels
+        self.lam = lam
+        self.att_r, self.att_n = _GLSA(c), _GLSA(c)
+        self.fb_n, self.fb_c, self.fb_o = _FusionBlock(c), _FusionBlock(c), _FusionBlock(c)
+        self.res = nn.Sequential(Conv(c, c, 3, g=c), Conv(c, c, 1))  # depthwise-separable residual block
+        nn.init.zeros_(self.res[1].bn.weight)
+
+    def forward(self, x):
+        rgb, nir = x[0], x[1]
+        ar, an = self.att_r(rgb), self.att_n(nir)
+        pr = torch.tanh(self.lam * ar * (1 - an))  # complementary weight of RGB w.r.t. NDVI (Eq.8)
+        pn = torch.tanh(self.lam * an * (1 - ar))  # complementary weight of NDVI w.r.t. RGB (Eq.7)
+        fn = self.fb_n(rgb * ar, nir * an)         # normal fusion branch (Eq.9-12)
+        fc = self.fb_c(rgb * pr, nir * pn)         # enhanced (complementary) branch (Eq.13-16)
+        fo = self.fb_o(fn, fc)                     # Eq.17-18
+        return rgb + self.res(fo)                  # Eq.19 residual block, injected into RGB stream
+
+
+class _CFE(nn.Module):
+    """Cross-modal Feature Enhancement block (ICAFusion Eq.5-8, Shen et al. 2023).
+    Enhances target modality with cross-attention: Q from source, K/V from target.
+    """
+    def __init__(self, c, num_heads, mlp_ratio=2.0):
+        super().__init__()
+        self.nq  = nn.LayerNorm(c)
+        self.nkv = nn.LayerNorm(c)
+        self.attn = nn.MultiheadAttention(c, num_heads, batch_first=True)
+        self.n2  = nn.LayerNorm(c)
+        h = int(c * mlp_ratio)
+        self.ffn = nn.Sequential(nn.Linear(c, h), nn.GELU(), nn.Linear(h, c))
+        self.alpha = nn.Parameter(torch.ones(1))
+        self.beta  = nn.Parameter(torch.ones(1))
+        self.gamma = nn.Parameter(torch.ones(1))
+        self.delta = nn.Parameter(torch.ones(1))
+
+    def forward(self, t_target, t_source):  # tokens (B, N, C)
+        q  = self.nq(t_source)
+        kv = self.nkv(t_target)
+        z  = self.attn(q, kv, kv, need_weights=False)[0]
+        t_prime = self.alpha * z + self.beta  * t_target
+        t_hat   = self.gamma * t_prime + self.delta * self.ffn(self.n2(t_prime))
+        return t_hat
+
+
+class ICAFusion(nn.Module):
+    """Iterative Cross-Attention Fusion (ICAFusion / DMFF, Shen et al., Pattern Recognition 2023).
+    Dual CFE (enhance RGB←query NIR, enhance NIR←query RGB), shared params across iters.
+    Pool to pool_size×pool_size before attention, upsample residual back to H×W.
+    Merge: (f_rgb + r_enhanced) + (f_nir + n_enhanced)  -- faithful readout, no extra params.
+    Inputs : f_rgb, f_nir  (B, C, H, W)
+    Output : fused          (B, C, H, W)   -- 1 tensor, drop-in for FusionRectify
+    """
+    def __init__(self, channels, num_heads=None, iters=2, pool_size=8):
+        super().__init__()
+        c = channels
+        if num_heads is None:
+            num_heads = next((h for h in (8, 4, 2, 1) if c % h == 0), 1)
+        self.p     = pool_size
+        self.iters = iters
+        self.pool  = nn.AdaptiveAvgPool2d(pool_size)
+        self.pos_r = nn.Parameter(torch.zeros(1, pool_size * pool_size, c))
+        self.pos_n = nn.Parameter(torch.zeros(1, pool_size * pool_size, c))
+        nn.init.trunc_normal_(self.pos_r, std=0.02)
+        nn.init.trunc_normal_(self.pos_n, std=0.02)
+        self.cfe_r = _CFE(c, num_heads)  # enhance RGB  (query from NIR)
+        self.cfe_n = _CFE(c, num_heads)  # enhance NIR  (query from RGB)
+
+    def forward(self, x):
+        f_rgb, f_nir = x[0], x[1]
+        B, C, H, W = f_rgb.shape
+        p = self.p
+        r = self.pool(f_rgb).flatten(2).transpose(1, 2) + self.pos_r  # (B, p*p, C)
+        n = self.pool(f_nir).flatten(2).transpose(1, 2) + self.pos_n
+        for _ in range(self.iters):  # shared params across iterations
+            r2 = self.cfe_r(r, n)   # target=RGB,  query=NIR
+            n2 = self.cfe_n(n, r)   # target=NIR,  query=RGB
+            r, n = r2, n2
+        r = r.transpose(1, 2).reshape(B, C, p, p)
+        n = n.transpose(1, 2).reshape(B, C, p, p)
+        r = F.interpolate(r, size=(H, W), mode='bilinear', align_corners=False)
+        n = F.interpolate(n, size=(H, W), mode='bilinear', align_corners=False)
+        # Merge: sum of both enhanced residuals -- faithful ICFE readout, no extra params
+        return (f_rgb + r) + (f_nir + n)
+
+
+class GAFF(nn.Module):
+    """Guided Attentive Feature Fusion (Zhang et al., WACV 2021) — simplified.
+    Attention masks learned end-to-end from detection loss (no auxiliary seg/selection loss).
+    Paper: 'GAFF (attention fusion, without auxiliary mask supervision)'
+    Inputs : x = [f_rgb, f_nir]  both (B, C, H, W)
+    Output : fused               (B, C, H, W)  — 1 tensor, drop-in for FusionRectify
+    """
+    def __init__(self, channels):
+        super().__init__()
+        c = channels
+        self.intra_rgb = nn.Conv2d(c, 1, kernel_size=3, padding=1)
+        self.intra_nir = nn.Conv2d(c, 1, kernel_size=3, padding=1)
+        self.inter     = nn.Conv2d(2 * c, 2, kernel_size=3, padding=1)
+
+    def forward(self, x):
+        f_rgb, f_nir = x[0], x[1]
+        # Intra-modality attention (Eq.1-2): spatial self-attention per stream
+        m_rgb = torch.sigmoid(self.intra_rgb(f_rgb))        # (B,1,H,W)
+        m_nir = torch.sigmoid(self.intra_nir(f_nir))
+        rgb_i = f_rgb * (1.0 + m_rgb)                       # intra-enhanced
+        nir_i = f_nir * (1.0 + m_nir)
+        # Inter-modality attention (Eq.3-4): 2-ch softmax mask from joint feature
+        inter = torch.softmax(self.inter(torch.cat([f_rgb, f_nir], dim=1)), dim=1)
+        w_rgb, w_nir = inter[:, 0:1], inter[:, 1:2]         # sum=1 per pixel
+        # Hybrid + fuse (Eq.8)
+        rgb_h = rgb_i * (1.0 + w_rgb)
+        nir_h = nir_i * (1.0 + w_nir)
+        return rgb_h + nir_h
+

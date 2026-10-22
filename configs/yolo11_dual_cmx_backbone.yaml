@@ -1,0 +1,114 @@
+# Ultralytics YOLO, AGPL-3.0 license
+# Exp20: CM-FRM @ Backbone-Injection (ablation: fusion position)
+#
+# Ablation variable: WHERE the 3 FusionRectify modules sit.
+#   Baseline (Exp09): FusionRectify at NECK (after both backbones finish)
+#   This  (Exp20):    FusionRectify INSIDE backbone at P3/P4/P5 stages
+#                     → rectified-RGB features flow through later backbone convs
+#                     → head taps FusionRectify outputs directly (no Add at neck)
+#
+# Everything else IDENTICAL to Exp09_CMX_Redux:
+#   - Same 3 FusionRectify modules (3, not 6 — unidirectional NDVI→RGB)
+#   - Same pretrain: yolo_dual_modulation_pretrain.pt
+#   - Same backbone depth/width, same PANet head
+#   - FusionRectify layers random-init (same as Exp09 random-init layers 21-23)
+#
+# Layer map (single variable changed vs Exp09):
+#   Exp09 head source:  P5=layer21, P4=layer22, P3=layer23
+#   Exp20 head source:  P5=layer23, P4=layer16, P3=layer11  (backbone outputs)
+
+nc: 4
+scales:
+  custom: [1.00, 1.00, 1024]
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, InputContainer, []]         # 0: Split 4ch → [RGB(3ch), NDVI(1ch)]
+
+  # =========================================================
+  # STREAM 1: R-G-NIR (Main) — YOLOv11s scale — up to P3-raw
+  # =========================================================
+  - [0,  1, Conv,  [32,  3, 2]]         # 1: s2,  32ch
+  - [-1, 1, Conv,  [64,  3, 2]]         # 2: s4,  64ch
+  - [-1, 1, C3k2,  [128, False, 0.25]]  # 3:     128ch
+  - [-1, 1, Conv,  [128, 3, 2]]         # 4: s8, 128ch
+  - [-1, 1, C3k2,  [128, False, 0.5]]   # 5: RGB P3-raw (128ch, stride=8)
+
+  # =========================================================
+  # STREAM 2: NDVI (Aux) — YOLOv11n scale — up to P3-raw
+  # =========================================================
+  - [0,  1, Conv,  [16,  3, 2]]         # 6:  s2,  16ch
+  - [-1, 1, Conv,  [32,  3, 2]]         # 7:  s4,  32ch
+  - [-1, 1, C3k2,  [64,  False, 0.25]]  # 8:       64ch
+  - [-1, 1, Conv,  [64,  3, 2]]         # 9:  s8,  64ch
+  - [-1, 1, C3k2,  [128, False, 0.5]]   # 10: NDVI P3-raw (128ch, stride=8)
+
+  # =========================================================
+  # INJECTION P3 (stride=8)
+  # tasks.py: c2 = max(ch[5], ch[10]) = 128
+  # =========================================================
+  - [[5, 10], 1, FusionRectify, []]     # 11: Rectified-RGB P3 (128ch)
+                                        #     → feeds layer 12 (backbone continues)
+                                        #     → tapped by head layer 28 (P3 detect)
+
+  # RGB continues from rectified P3 (injection effect)
+  - [-1,  1, Conv,  [128, 3, 2]]        # 12: from layer 11, s16, 128ch
+  - [-1,  1, C3k2,  [256, True, 0.5]]   # 13: RGB P4-raw (256ch)
+
+  # NDVI continues from NDVI P3 (layer 10)
+  - [10,  1, Conv,  [128, 3, 2]]        # 14: from layer 10, s16, 128ch
+  - [-1,  1, C3k2,  [256, True, 0.5]]   # 15: NDVI P4-raw (256ch)
+
+  # =========================================================
+  # INJECTION P4 (stride=16)
+  # tasks.py: c2 = max(ch[13], ch[15]) = 256
+  # =========================================================
+  - [[13, 15], 1, FusionRectify, []]    # 16: Rectified-RGB P4 (256ch)
+                                        #     → feeds layer 17 (backbone continues)
+                                        #     → tapped by head layer 25 (P4 detect)
+
+  # RGB continues from rectified P4
+  - [-1,  1, Conv,  [256, 3, 2]]        # 17: from layer 16, s32, 256ch
+  - [-1,  1, C3k2,  [512, True, 0.5]]   # 18: RGB P5-raw (512ch)
+  - [-1,  1, SPPF,  [512, 5]]           # 19: RGB P5-SPPF (512ch)
+
+  # NDVI continues from NDVI P4 (layer 15)
+  - [15,  1, Conv,  [256, 3, 2]]        # 20: from layer 15, s32, 256ch
+  - [-1,  1, C3k2,  [512, True, 0.5]]   # 21: NDVI P5-raw (512ch)
+  - [-1,  1, SPPF,  [512, 5]]           # 22: NDVI P5-SPPF (512ch)
+
+  # =========================================================
+  # INJECTION P5 (stride=32)
+  # tasks.py: c2 = max(ch[19], ch[22]) = 512
+  # =========================================================
+  - [[19, 22], 1, FusionRectify, []]    # 23: Rectified-RGB P5 (512ch)
+                                        #     → tapped by head layer 24 + 34 (P5 detect)
+
+head:
+  # =========================================================
+  # PANet Detection Head — IDENTICAL to Exp09_CMX_Redux
+  # P3=layer11, P4=layer16, P5=layer23  (all FusionRectify outputs, 128/256/512ch)
+  # =========================================================
+
+  # Top-down: P5 → P4
+  - [23,     1, nn.Upsample, [None, 2, "nearest"]]  # 24: 512ch upsample
+  - [[-1, 16], 1, Concat, [1]]                      # 25: 512+256=768ch
+  - [-1,     1, C3k2, [512, False]]                 # 26: 512ch
+
+  # Top-down: P4 → P3
+  - [26,     1, nn.Upsample, [None, 2, "nearest"]]  # 27: 512ch upsample
+  - [[-1, 11], 1, Concat, [1]]                      # 28: 512+128=640ch
+  - [-1,     1, C3k2, [256, False]]                 # 29: 256ch  ← P3 detect output
+
+  # Bottom-up: P3 → P4
+  - [29,     1, Conv, [256, 3, 2]]                  # 30: 256ch
+  - [[-1, 26], 1, Concat, [1]]                      # 31: 256+512=768ch
+  - [-1,     1, C3k2, [512, False]]                 # 32: 512ch  ← P4 detect output
+
+  # Bottom-up: P4 → P5
+  - [32,     1, Conv, [512, 3, 2]]                  # 33: 512ch
+  - [[-1, 23], 1, Concat, [1]]                      # 34: 512+512=1024ch
+  - [-1,     1, C3k2, [512, True]]                  # 35: 512ch  ← P5 detect output
+
+  # Detect from [P3=256ch @ 29, P4=512ch @ 32, P5=512ch @ 35]
+  - [[29, 32, 35], 1, Detect, [nc]]                 # 36

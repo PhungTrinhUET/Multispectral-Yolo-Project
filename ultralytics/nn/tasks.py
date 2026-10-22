@@ -54,11 +54,17 @@ from ultralytics.nn.modules import (
     ImagePoolingAttn,
     InputContainer, #Add new
     FusionAdd, #Add new
+    FusionConcat, #Add new
     FusionAFF, # Add new
     FusionRectify, # Add new
+    FusionRectifyGated,  # S9: CM-FRM with zero-init gate
     FusionDeformRectify, #Add new
     FusionCrossCBAM, #add new
     FusionRectifyFeedback, #Add new
+    FusionModulation, #Add new
+    ICAFusion,        # ICAFusion (Shen et al. 2023)
+    FusionComplementary,  # ADMPF-style (Liu et al. 2025)
+    GAFF,             # GAFF (Zhang et al., WACV 2021)
     Index,
     LRPCHead,
     Pose,
@@ -163,15 +169,14 @@ class BaseModel(torch.nn.Module):
     
     def _predict_once(self, x, profile=False, visualize=False, embed=None):
         """
-        Perform a forward pass through the network.
-        FIXED FOR EXP 12: Dual-Stream Rectified Feedback
+        FIXED FOR EXP 13: GMD-YOLO (Dual-Stream Modulation)
         """
         y, dt, embeddings = [], [], []
         embed = frozenset(embed) if embed is not None else {-1}
         max_idx = max(embed)
 
         for m in self.model:
-            # 1. Chuẩn bị Input (x) cho layer hiện tại (m)
+            # 1. Chuẩn bị Input
             if m.f != -1:
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
             
@@ -179,30 +184,34 @@ class BaseModel(torch.nn.Module):
                 self._profile_one_layer(m, x, dt)
 
             # ==========================================================
-            # [PATCH EXP 12] LOGIC TÁCH DÒNG CHẢY (SELECTOR)
-            # Chỉ can thiệp nếu input là List (Dual-Stream) VÀ không phải là Concat/Fusion
+            # [PATCH DUAL-STREAM] ROUTE LIST INPUT FROM InputContainer
             # ==========================================================
             if isinstance(x, list) and len(x) == 2:
-                # Lấy tên class của layer để kiểm tra
                 m_type = str(type(m))
-                
-                # CHỈ xử lý nếu layer là Conv (Selector), KHÔNG xử lý Concat hay Fusion
-                if 'Concat' not in m_type and 'Fusion' not in m_type:
-                    # Danh sách các Layer Selector của nhánh RGB (Lấy phần tử 0)
-                    # 1: Stem RGB, 13: P3 RGB, 21: P4 RGB
-                    if m.i in [1, 13, 21]: 
-                        x = x[0]
-                    
-                    # Danh sách các Layer Selector của nhánh NIR (Lấy phần tử 1)
-                    # 4: Stem NIR, 14: P3 NIR, 22: P4 NIR
-                    elif m.i in [4, 14, 22]:
+
+                # Only intervene if layer is NOT a Fusion/Concat/Detect consumer
+                if not any(k in m_type for k in ['Concat', 'Fusion', 'Detect', 'GAFF']):
+
+                    # Detect expected in-channels from Conv weight
+                    _in_ch = getattr(getattr(m, 'conv', None), 'in_channels', None)
+
+                    # Opt-in (yaml `aux_stem`): this stem takes only the NDVI branch (1ch)
+                    if m.i == getattr(self, "yaml", {}).get("aux_stem"):
                         x = x[1]
+                    # Early-fusion: layer expects full concatenated input (4ch)
+                    elif _in_ch is not None and _in_ch > 3:
+                        x = torch.cat(x, dim=1)
+                    # Dual-stream: route by branch index
+                    elif 1 <= m.i <= 10:
+                        x = x[0]  # RGB branch
+                    elif 11 <= m.i <= 20:
+                        x = x[1]  # NIR branch
             # ==========================================================
 
             # 2. Chạy Layer
             x = m(x)
             
-            # 3. Lưu Output vào Cache (y)
+            # 3. Lưu Cache
             y.append(x if m.i in self.save else None)
 
             if visualize:
@@ -1576,7 +1585,9 @@ def parse_model(d, ch, verbose=True):
             # =========================================================
             if i == 1:      # Layer 1 (Nhánh RGB) -> Ép nhận 3 kênh
                 c1 = 3
-            elif i == 4:   # Layer 4 (Nhánh NIR) -> Ép nhận 1 kênh
+            elif i == 11:   # Layer 4 (Nhánh NIR) -> Ép nhận 1 kênh
+                c1 = 1
+            if i == d.get("aux_stem"):  # opt-in: stem nhánh phụ chỉ nhận kênh NDVI (1 kênh)
                 c1 = 1
             # =========================================================
 
@@ -1637,17 +1648,15 @@ def parse_model(d, ch, verbose=True):
         # =========================================================
         # [ MODULE FUSION MỚI 
         # =========================================================
-        elif m in {FusionAdd, FusionRectify, FusionDeformRectify, FusionCrossCBAM, FusionRectifyFeedback}:
-            if isinstance(f, list):
-                c2 = ch[f[0]]
-            else:
-                c2 = ch[f]
-            
+        elif m in {FusionAdd, FusionAFF, FusionConcat, FusionRectify, FusionRectifyGated, FusionDeformRectify, FusionCrossCBAM, FusionRectifyFeedback, FusionModulation, ICAFusion, GAFF, FusionComplementary}:
+            c2 = max([ch[x] for x in f])
             # Logic args
-            if m in {FusionRectify, FusionDeformRectify, FusionCrossCBAM, FusionRectifyFeedback}: # <--- THÊM VÀO ĐÂY
+            if m is ICAFusion:
+                args = [c2, *args]  # ICAFusion(channels, [num_heads, iters, pool_size] from yaml)
+            elif m in {FusionAFF, FusionConcat, FusionRectify, FusionRectifyGated, FusionDeformRectify, FusionCrossCBAM, FusionRectifyFeedback, FusionModulation, GAFF, FusionComplementary}:
                 args = [c2]
             else:
-                args = [c2, c2]
+                args = [c2, c2]  # FusionAdd(c1, c2)
         # =========================================================
 
         else:

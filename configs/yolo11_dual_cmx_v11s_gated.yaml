@@ -1,0 +1,78 @@
+# Ultralytics YOLO, AGPL-3.0 license
+# S9 (revision): dual-stream YOLOv11 + gated CM-FRM on an exact YOLOv11s RGB stream and head
+#
+# Stream 1 (R-G-NIR) + head = yolo11s (yolo11.yaml at scale s: width .50, depth .50 -> every C3k2/C2PSA has n=1),
+# written out with explicit widths under a custom [1.00, 1.00, 1024] scale. Stream 2 (4-ch input, NDVI-stream stem)
+# = the original CMX_Backbone NDVI stream; only its P3 output is widened 128 -> 256 to match the yolo11s P3 width.
+# Fusion = FusionRectifyGated: CM-FRM with a zero-initialised per-channel gate on the NDVI correction, so at init the
+# fused P3/P4/P5 equal the RGB features and the whole model computes yolo11s (COCO init) on the R-G-NIR planes.
+#
+# Layer map yolo11s -> S9 (layers with parameters): 0-4 -> 1-5, 5 -> 12, 6 -> 13, 7 -> 17, 8 -> 18, 9 -> 19,
+# 10 -> 20 (C2PSA, before the P5 fusion), 13 -> 27, 16 -> 30, 17 -> 31, 19 -> 33, 20 -> 34, 22 -> 36, 23 -> 37 (Detect)
+# Fused taps: P3 = 11 (yolo11s 4), P4 = 16 (yolo11s 6), P5 = 24 (yolo11s 10)
+
+nc: 4
+scales:
+  custom: [1.00, 1.00, 1024]
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, InputContainer, []]         # 0: Split 4ch -> [RGB(3ch), NDVI(1ch)]
+
+  # STREAM 1: R-G-NIR = yolo11s backbone 0-4
+  - [0,  1, Conv,  [32,  3, 2]]         # 1: s2,   32ch (yolo11s 0)
+  - [-1, 1, Conv,  [64,  3, 2]]         # 2: s4,   64ch (yolo11s 1)
+  - [-1, 1, C3k2,  [128, False, 0.25]]  # 3:      128ch (yolo11s 2)
+  - [-1, 1, Conv,  [128, 3, 2]]         # 4: s8,  128ch (yolo11s 3)
+  - [-1, 1, C3k2,  [256, False, 0.25]]  # 5: RGB P3-raw (256ch) (yolo11s 4)
+
+  # STREAM 2: NDVI (4-ch stem, as in CMX_Backbone)
+  - [0,  1, Conv,  [16,  3, 2]]         # 6:  s2,  16ch
+  - [-1, 1, Conv,  [32,  3, 2]]         # 7:  s4,  32ch
+  - [-1, 1, C3k2,  [64,  False, 0.25]]  # 8:       64ch
+  - [-1, 1, Conv,  [64,  3, 2]]         # 9:  s8,  64ch
+  - [-1, 1, C3k2,  [256, False, 0.25]]  # 10: NDVI P3-raw (256ch; CMX_Backbone: 128)
+
+  # INJECTION P3 (stride=8)
+  - [[5, 10], 1, FusionRectifyGated, []]  # 11: Rectified-RGB P3 (256ch)
+
+  - [-1,  1, Conv,  [256, 3, 2]]        # 12: s16, 256ch (yolo11s 5)
+  - [-1,  1, C3k2,  [256, True]]        # 13: RGB P4-raw (256ch) (yolo11s 6)
+
+  - [10,  1, Conv,  [128, 3, 2]]        # 14: from layer 10, s16, 128ch
+  - [-1,  1, C3k2,  [256, True, 0.5]]   # 15: NDVI P4-raw (256ch)
+
+  # INJECTION P4 (stride=16)
+  - [[13, 15], 1, FusionRectifyGated, []]  # 16: Rectified-RGB P4 (256ch)
+
+  - [-1,  1, Conv,  [512, 3, 2]]        # 17: s32, 512ch (yolo11s 7)
+  - [-1,  1, C3k2,  [512, True]]        # 18: (yolo11s 8)
+  - [-1,  1, SPPF,  [512, 5]]           # 19: (yolo11s 9)
+  - [-1,  1, C2PSA, [512]]              # 20: RGB P5 (512ch) (yolo11s 10)
+
+  - [15,  1, Conv,  [256, 3, 2]]        # 21: from layer 15, s32, 256ch
+  - [-1,  1, C3k2,  [512, True, 0.5]]   # 22: NDVI P5-raw (512ch)
+  - [-1,  1, SPPF,  [512, 5]]           # 23: NDVI P5-SPPF (512ch)
+
+  # INJECTION P5 (stride=32)
+  - [[20, 23], 1, FusionRectifyGated, []]  # 24: Rectified-RGB P5 (512ch)
+
+head:
+  # yolo11s head (yolo11s 11-23 -> 25-37); P3 = 11, P4 = 16, P5 = 24
+  - [24,     1, nn.Upsample, [None, 2, "nearest"]]  # 25 (yolo11s 11)
+  - [[-1, 16], 1, Concat, [1]]                      # 26: 512+256=768ch (yolo11s 12)
+  - [-1,     1, C3k2, [256, False]]                 # 27: 256ch (yolo11s 13)
+
+  - [-1,     1, nn.Upsample, [None, 2, "nearest"]]  # 28 (yolo11s 14)
+  - [[-1, 11], 1, Concat, [1]]                      # 29: 256+256=512ch (yolo11s 15)
+  - [-1,     1, C3k2, [128, False]]                 # 30: 128ch <- P3 detect output (yolo11s 16)
+
+  - [-1,     1, Conv, [128, 3, 2]]                  # 31 (yolo11s 17)
+  - [[-1, 27], 1, Concat, [1]]                      # 32: 128+256=384ch (yolo11s 18)
+  - [-1,     1, C3k2, [256, False]]                 # 33: 256ch <- P4 detect output (yolo11s 19)
+
+  - [-1,     1, Conv, [256, 3, 2]]                  # 34 (yolo11s 20)
+  - [[-1, 24], 1, Concat, [1]]                      # 35: 256+512=768ch (yolo11s 21)
+  - [-1,     1, C3k2, [512, True]]                  # 36: 512ch <- P5 detect output (yolo11s 22)
+
+  - [[30, 33, 36], 1, Detect, [nc]]                 # 37 (yolo11s 23)

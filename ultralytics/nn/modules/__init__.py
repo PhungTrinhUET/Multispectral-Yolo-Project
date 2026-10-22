@@ -33,11 +33,17 @@ from .block import (
     A2C2f,
     InputContainer,  # <--- NEW
     FusionAdd, # NEW
+    FusionConcat, # NEW
     FusionAFF, # NEW
     FusionRectify, #NEW
+    FusionRectifyGated,  # S9: CM-FRM with zero-init gate
     FusionDeformRectify, #Add new
     FusionCrossCBAM, # Add new
     FusionRectifyFeedback, #Add new
+    FusionModulation, #Add new
+    ICAFusion,        # ICAFusion (Shen et al. 2023)
+    FusionComplementary,  # ADMPF-style (Liu et al. 2025)
+    GAFF,             # GAFF (Zhang et al., WACV 2021)
     AConv,
     ADown,
     Attention,
@@ -178,11 +184,17 @@ __all__ = (
     "SCDown",
     "InputContainer", # MỚI
     "FusionAdd", # MỚI
-    "FusionAFF", # MỚI 
+    "FusionConcat", # MỚI
+    "FusionAFF", # MỚI
     "FusionRectify", #MỚI
+    "FusionRectifyGated",
     "FusionDeformRectify" #NEW
     "FusionCrossCBAM" #NEW
     "FusionRectifyFeedback" #New
+    "FusionModulation", # Add new
+    "ICAFusion",        # ICAFusion (Shen et al. 2023)
+    "FusionComplementary",
+    "GAFF",             # GAFF (Zhang et al., WACV 2021)
     "Segment",
     "SpatialAttention",
     "TorchVision",
