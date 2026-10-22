@@ -1,82 +1,92 @@
+import json
+import os
 import torch
 import time
-import numpy as np
+from datetime import datetime
+from pathlib import Path
 from ultralytics import YOLO
 from ultralytics.utils.torch_utils import select_device
 
+
 def benchmark_model(weights_path, data_path, imgsz=1280, device='0'):
-    # 1. Khởi tạo
     print(f"\n{'='*20} BENCHMARKING STARTED {'='*20}")
     print(f"Model: {weights_path}")
-    print(f"Image Size: {imgsz}")
-    
+
     device = select_device(device)
     model = YOLO(weights_path)
-    
-    # Ép model load sang device (GPU)
     model.to(device)
-    
-    # 2. Lấy GFLOPs 
-    # Lấy từ log có sẵn của model
-    print(f"\n--- 1. COMPUTATIONAL COST ---")
-    model.info(detailed=True) 
 
-    # 3. Đo VRAM Usage 
+    print(f"\n--- 1. COMPUTATIONAL COST ---")
+    model.info(detailed=False)
+
+    # Warmup
+    print(f"\n--- 2. WARMUP ---")
+    dummy_input = torch.randn(1, 4, imgsz, imgsz).to(device)
+    for _ in range(10):
+        model(dummy_input, verbose=False)
+
+    # Speed test
+    print(f"\n--- 3. SPEED TEST (Batch=1) ---")
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.empty_cache()
-    
-    # 4. Chạy Warmup (Khởi động để tránh tính thời gian load model)
-    print(f"\n--- 2. WARMUP ---")
-    dummy_input = torch.randn(1, 4, imgsz, imgsz).to(device) # Input 4 kênh giả lập
-    for _ in range(10):
-        _ = model(dummy_input, verbose=False)
-    
-    # 5. Đo FPS & Inference Time (Batch size = 1)
-    print(f"\n--- 3. SPEED TEST (Batch=1) ---")
     num_samples = 100
     t_start = time.time()
     for _ in range(num_samples):
-        _ = model(dummy_input, verbose=False)
+        model(dummy_input, verbose=False)
     t_end = time.time()
-    
-    total_time = t_end - t_start
-    avg_time_per_img = total_time / num_samples * 1000 # ms
-    fps = 1000 / avg_time_per_img
-    
-    print(f"Test samples: {num_samples}")
-    print(f"Average Inference Time: {avg_time_per_img:.2f} ms")
-    print(f"FPS (Batch 1): {fps:.2f}")
+    avg_ms = (t_end - t_start) / num_samples * 1000
+    fps = 1000 / avg_ms
+    max_memory = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
 
-    # 6. Đo VRAM Peak
-    max_memory = torch.cuda.max_memory_allocated(device) / (1024 ** 2) # MB
-    print(f"\n--- 4. VRAM USAGE ---")
-    print(f"Max VRAM Allocated: {max_memory:.2f} MB")
+    print(f"Inference: {avg_ms:.2f} ms  |  FPS: {fps:.2f}  |  VRAM: {max_memory:.2f} MB")
 
-    # 7. Lấy chỉ số chính xác (Validation)
-    print(f"\n--- 5. ACCURACY METRICS (mAP) ---")
-    # Lưu ý: Chạy val thật trên tập dữ liệu test
-    metrics = model.val(data=data_path, split='val', imgsz=imgsz, batch=4, verbose=True)
-    
-    print("\n" + "="*20 + " SUMMARY " + "="*20)
-    print(f"Model: {weights_path}")
-    print(f"mAP@50:    {metrics.box.map50:.4f}")
-    print(f"mAP@50-95: {metrics.box.map:.4f}")
-    print(f"Precision: {metrics.box.mp:.4f}")
-    print(f"Recall:    {metrics.box.mr:.4f}")
-    print(f"Inference: {avg_time_per_img:.2f} ms")
-    print(f"FPS:       {fps:.2f}")
-    print(f"VRAM:      {max_memory:.2f} MB")
+    # Accuracy
+    print(f"\n--- 4. ACCURACY (val set) ---")
+    metrics = model.val(data=data_path, split='val', imgsz=imgsz, batch=4, verbose=False)
+
+    results = {
+        "weights":       weights_path,
+        "date":          datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "imgsz":         imgsz,
+        "mAP50":         round(float(metrics.box.map50), 4),
+        "mAP50-95":      round(float(metrics.box.map), 4),
+        "precision":     round(float(metrics.box.mp), 4),
+        "recall":        round(float(metrics.box.mr), 4),
+        "inference_ms":  round(avg_ms, 2),
+        "fps":           round(fps, 2),
+        "vram_mb":       round(max_memory, 2),
+    }
+
+    # Lưu vào thư mục experiment (cùng cấp với best.pt)
+    exp_dir = Path(weights_path).parent.parent
+    out_path = exp_dir / "benchmark_results.json"
+    with open(out_path, "w") as f:
+        json.dump(results, f, indent=2)
+
+    print(f"\n{'='*20} SUMMARY {'='*20}")
+    for k, v in results.items():
+        print(f"  {k:<15}: {v}")
+    print(f"\n  Saved -> {out_path}")
     print("="*50)
 
+    return results
+
+
 if __name__ == '__main__':
-    # Cấu hình đường dẫn
-    WEIGHTS = '/home/tower2080/Documents/DuaLuoi/Multispectral_YOLO_Project/ultralytics/Multispectral_DuaLuoi_Project/Exp12_Rectify_Feedback_Final/weights/best.pt'
     DATA_YAML = '/home/tower2080/Documents/DuaLuoi/yolov5/data_compact/dataset_raw/data.yaml'
-    
-    # Chạy benchmark
-    # Lưu ý: Chỉ chạy khi đã có file best.pt
-    try:
-        benchmark_model(WEIGHTS, DATA_YAML, imgsz=1280)
-    except Exception as e:
-        print(f"Chưa chạy được Benchmark vì: {e}")
-        print("DONE")
+    WEIGHTS_LIST = [
+        'Multispectral_DuaLuoi_Project/Exp1_NoPretrain_1280px/weights/best.pt',
+        'Multispectral_DuaLuoi_Project/Exp7_Dual_AFF_CustomPretrain2/weights/best.pt',
+        'Multispectral_DuaLuoi_Project/Exp9_Dual_Rectify_CustomPretrain/weights/best.pt',
+        'Multispectral_DuaLuoi_Project/Exp11_CrossCBAM_Spatial/weights/best.pt',
+        'Multispectral_DuaLuoi_Project/Exp12_Rectify_Feedback_Final/weights/best.pt',
+        'Multispectral_DuaLuoi_Project/Exp13_GMD_Modulation/weights/best.pt',
+        'Multispectral_DuaLuoi_Project/Exp09_CMX_Redux/weights/best.pt',
+        'Multispectral_DuaLuoi_Project/Exp16_AgriFusion_Fixed/weights/best.pt',
+    ]
+
+    for w in WEIGHTS_LIST:
+        try:
+            benchmark_model(w, DATA_YAML, imgsz=1280)
+        except Exception as e:
+            print(f"[ERROR] {w}: {e}")

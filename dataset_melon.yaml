@@ -5,6 +5,7 @@ val: images/val
 test: images/test
 
 nc: 4
+channels: 4  # RGB + NDVI (4-channel input for dual-stream model)
 
 names: 
   0: truoc_thu_phan

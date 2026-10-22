@@ -9,6 +9,7 @@ from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from typing import Any
 
+import math
 import os
 import cv2
 import numpy as np
@@ -86,12 +87,17 @@ class YOLODataset(BaseDataset):
         self.use_obb = task == "obb"
         self.data = data
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
-        super().__init__(*args, channels=self.data.get("channels", 3), **kwargs)
+        # 'ch' (integer) wins over 'channels' because check_det_dataset injects channels:3 as default
+        _ch = self.data.get("ch")
+        _n_ch = _ch if isinstance(_ch, int) else self.data.get("channels", 3)
+        super().__init__(*args, channels=_n_ch, **kwargs)
 
-    def load_image(self, i):
+    def load_image(self, i, rect_mode=True):
         """
         Custom Loader: Ghép ảnh từ 'dataset_raw' và 'dataset_ndvi'.
-        Tự động dò tìm đuôi file (jpg, png, tif) của ảnh NDVI.
+        Nếu data.yaml có channels=3 (hoặc ch=3) thì chỉ trả về ảnh gốc 3ch (R,G,NIR).
+        Nếu channels=4 thì ghép thêm NDVI thành 4ch.
+        Mirrors base.py resize logic so ratio_pad is correct during validation.
         """
 
         # 1. Lấy đường dẫn ảnh gốc (từ dataset_raw)
@@ -99,31 +105,40 @@ class YOLODataset(BaseDataset):
         im_base = cv2.imread(f_base)  # (H, W, 3)
 
         if im_base is None:
-             raise FileNotFoundError(f'[Lỗi] Không tìm thấy ảnh gốc: {f_base}')
+            raise FileNotFoundError(f'[Lỗi] Không tìm thấy ảnh gốc: {f_base}')
+
+        # 'ch' (explicit int) wins; 'channels' may be injected as 3 by check_det_dataset
+        _ch = self.data.get("ch")
+        n_channels = _ch if isinstance(_ch, int) else self.data.get("channels", 3)
+
+        if n_channels == 3:
+            h0, w0 = im_base.shape[:2]
+            if rect_mode:
+                r = self.imgsz / max(h0, w0)
+                if r != 1:
+                    w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
+                    im_base = cv2.resize(im_base, (w, h), interpolation=cv2.INTER_LINEAR)
+            elif not (h0 == w0 == self.imgsz):
+                im_base = cv2.resize(im_base, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
+            return im_base, (h0, w0), im_base.shape[:2]
 
         # 2. Tạo đường dẫn cơ sở sang folder NDVI
-        # Thay thế folder cha 'dataset_raw' bằng 'dataset_ndvi'
         f_ndvi_base = f_base.replace('/dataset_raw/', '/dataset_ndvi/')
-        
         f_ndvi_no_ext = os.path.splitext(f_ndvi_base)[0]
 
-        # 3. Dò tìm file NDVI 
+        # 3. Dò tìm file NDVI
         im_ndvi = None
-        # Danh sách đuôi ưu tiên: png (phổ biến cho mask/ndvi), tif, jpg
-        valid_extensions = ['.png', '.tif', '.tiff', '.jpg', '.jpeg']
-        
-        found_path = ""
-        for ext in valid_extensions:
+        for ext in ['.png', '.tif', '.tiff', '.jpg', '.jpeg']:
             path_check = f_ndvi_no_ext + ext
             if os.path.exists(path_check):
-                found_path = path_check
-                # Load ảnh (flag=-1 để giữ nguyên depth nếu là tif, hoặc 0 cho gray)
                 im_ndvi = cv2.imread(path_check, cv2.IMREAD_GRAYSCALE)
                 break
-        
+
         if im_ndvi is None:
-            debug_path = f_ndvi_no_ext + ".[png|tif|jpg]"
-            raise FileNotFoundError(f'[Lỗi] Không tìm thấy file NDVI (đã thử png, tif, jpg).\nĐường dẫn gốc: {debug_path}')
+            raise FileNotFoundError(
+                f'[Lỗi] Không tìm thấy file NDVI (đã thử png, tif, jpg).\n'
+                f'Đường dẫn gốc: {f_ndvi_no_ext}.[png|tif|jpg]'
+            )
 
         # 4. Kiểm tra kích thước (Resize NDVI nếu lệch)
         if im_ndvi.shape != im_base.shape[:2]:
@@ -132,8 +147,16 @@ class YOLODataset(BaseDataset):
         # 5. GHÉP KÊNH (Stacking) -> (H,W,4)
         im_final = np.concatenate((im_base, im_ndvi[:, :, None]), axis=2)
 
-        # 6. Trả về kết quả
         h0, w0 = im_final.shape[:2]
+        # 6. Resize to imgsz (mirrors base.py) so ratio_pad = resized/ori is correct
+        if rect_mode:
+            r = self.imgsz / max(h0, w0)
+            if r != 1:
+                w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
+                im_final = cv2.resize(im_final, (w, h), interpolation=cv2.INTER_LINEAR)
+        elif not (h0 == w0 == self.imgsz):
+            im_final = cv2.resize(im_final, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
+
         return im_final, (h0, w0), im_final.shape[:2]
 
     def cache_labels(self, path: Path = Path("./labels.cache")) -> dict:

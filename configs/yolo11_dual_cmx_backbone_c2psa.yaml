@@ -1,0 +1,84 @@
+# Ultralytics YOLO, AGPL-3.0 license
+# S8 (revision): CMX_Backbone (yolo11_dual_cmx_backbone.yaml) + C2PSA on the fused P5
+#
+# Single change vs yolo11_dual_cmx_backbone.yaml:
+#   one C2PSA(512) inserted after the P5 FusionRectify (layer 23) as new layer 24.
+#   YOLOv11 ends its backbone with SPPF → C2PSA (yolo11.yaml layer 10); the proposed had SPPF but no C2PSA.
+#   Head = the original head shifted by one index; like yolo11.yaml (which taps layer 10), it taps the C2PSA
+#   output for P5 in both places the original tapped layer 23 (top-down upsample and bottom-up concat).
+#
+# Layer map vs the original:
+#   0-23 unchanged; 24 = C2PSA (new, 990,976 params); original 24-36 → 25-37
+#   Detect: original [29, 32, 35] → [30, 33, 36]
+
+nc: 4
+scales:
+  custom: [1.00, 1.00, 1024]
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, InputContainer, []]         # 0: Split 4ch → [RGB(3ch), NDVI(1ch)]
+
+  # STREAM 1: R-G-NIR (Main) — up to P3-raw
+  - [0,  1, Conv,  [32,  3, 2]]         # 1: s2,  32ch
+  - [-1, 1, Conv,  [64,  3, 2]]         # 2: s4,  64ch
+  - [-1, 1, C3k2,  [128, False, 0.25]]  # 3:     128ch
+  - [-1, 1, Conv,  [128, 3, 2]]         # 4: s8, 128ch
+  - [-1, 1, C3k2,  [128, False, 0.5]]   # 5: RGB P3-raw (128ch, stride=8)
+
+  # STREAM 2: NDVI (Aux) — up to P3-raw
+  - [0,  1, Conv,  [16,  3, 2]]         # 6:  s2,  16ch
+  - [-1, 1, Conv,  [32,  3, 2]]         # 7:  s4,  32ch
+  - [-1, 1, C3k2,  [64,  False, 0.25]]  # 8:       64ch
+  - [-1, 1, Conv,  [64,  3, 2]]         # 9:  s8,  64ch
+  - [-1, 1, C3k2,  [128, False, 0.5]]   # 10: NDVI P3-raw (128ch, stride=8)
+
+  # INJECTION P3 (stride=8)
+  - [[5, 10], 1, FusionRectify, []]     # 11: Rectified-RGB P3 (128ch)
+
+  - [-1,  1, Conv,  [128, 3, 2]]        # 12: from layer 11, s16, 128ch
+  - [-1,  1, C3k2,  [256, True, 0.5]]   # 13: RGB P4-raw (256ch)
+
+  - [10,  1, Conv,  [128, 3, 2]]        # 14: from layer 10, s16, 128ch
+  - [-1,  1, C3k2,  [256, True, 0.5]]   # 15: NDVI P4-raw (256ch)
+
+  # INJECTION P4 (stride=16)
+  - [[13, 15], 1, FusionRectify, []]    # 16: Rectified-RGB P4 (256ch)
+
+  - [-1,  1, Conv,  [256, 3, 2]]        # 17: from layer 16, s32, 256ch
+  - [-1,  1, C3k2,  [512, True, 0.5]]   # 18: RGB P5-raw (512ch)
+  - [-1,  1, SPPF,  [512, 5]]           # 19: RGB P5-SPPF (512ch)
+
+  - [15,  1, Conv,  [256, 3, 2]]        # 20: from layer 15, s32, 256ch
+  - [-1,  1, C3k2,  [512, True, 0.5]]   # 21: NDVI P5-raw (512ch)
+  - [-1,  1, SPPF,  [512, 5]]           # 22: NDVI P5-SPPF (512ch)
+
+  # INJECTION P5 (stride=32)
+  - [[19, 22], 1, FusionRectify, []]    # 23: Rectified-RGB P5 (512ch)
+  - [-1,  1, C2PSA, [512]]              # 24: NEW — position-sensitive attention on fused P5 (512ch)
+
+head:
+  # Original head shifted by one; P3=layer11, P4=layer16, P5=layer24 (C2PSA)
+
+  # Top-down: P5 → P4
+  - [24,     1, nn.Upsample, [None, 2, "nearest"]]  # 25: 512ch upsample
+  - [[-1, 16], 1, Concat, [1]]                      # 26: 512+256=768ch
+  - [-1,     1, C3k2, [512, False]]                 # 27: 512ch
+
+  # Top-down: P4 → P3
+  - [27,     1, nn.Upsample, [None, 2, "nearest"]]  # 28: 512ch upsample
+  - [[-1, 11], 1, Concat, [1]]                      # 29: 512+128=640ch
+  - [-1,     1, C3k2, [256, False]]                 # 30: 256ch  ← P3 detect output
+
+  # Bottom-up: P3 → P4
+  - [30,     1, Conv, [256, 3, 2]]                  # 31: 256ch
+  - [[-1, 27], 1, Concat, [1]]                      # 32: 256+512=768ch
+  - [-1,     1, C3k2, [512, False]]                 # 33: 512ch  ← P4 detect output
+
+  # Bottom-up: P4 → P5
+  - [33,     1, Conv, [512, 3, 2]]                  # 34: 512ch
+  - [[-1, 24], 1, Concat, [1]]                      # 35: 512+512=1024ch
+  - [-1,     1, C3k2, [512, True]]                  # 36: 512ch  ← P5 detect output
+
+  # Detect from [P3=256ch @ 30, P4=512ch @ 33, P5=512ch @ 36]
+  - [[30, 33, 36], 1, Detect, [nc]]                 # 37

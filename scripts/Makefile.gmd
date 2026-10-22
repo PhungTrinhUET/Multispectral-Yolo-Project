@@ -1,0 +1,54 @@
+# Makefile.gmd  —  compile gmd_bench on VOXL2
+# Usage (on board):  make -f Makefile.gmd
+#
+# Probes for OpenCV layout at build time:
+#   libopencv_world.so  (single-lib, e.g. voxl-opencv)  — preferred
+#   libopencv_core + imgcodecs + imgproc                 — fallback
+#
+# If the board uses a non-standard OpenCV prefix, override:
+#   make -f Makefile.gmd OPENCV_INC=/opt/opencv/include OPENCV_LIB=/opt/opencv/lib
+
+CXX      := g++
+CXXFLAGS := -O2 -std=c++14 -Wall
+
+# TFLite
+TFL_INC  := /usr/include
+TFL_LIB  := /usr/lib
+TFL_LINK := tensorflow-lite
+
+# OpenCV — detect at build time
+OPENCV_INC ?= /usr/include/opencv4
+OPENCV_LIB ?= /usr/lib
+
+# Probe: prefer libopencv_world (single-lib voxl-opencv build)
+CV_WORLD := $(shell ls $(OPENCV_LIB)/libopencv_world.so 2>/dev/null)
+ifneq ($(CV_WORLD),)
+  CV_LIBS := -lopencv_world
+else
+  CV_LIBS := -lopencv_core -lopencv_imgcodecs -lopencv_imgproc
+endif
+
+SRC  := gmd_bench.cpp
+BIN  := gmd_bench
+
+all: $(BIN)
+	@echo "================================================================"
+	@echo "Build OK: ./$(BIN)"
+	@echo "OpenCV layout: $(if $(CV_WORLD),world ($(CV_WORLD)),split)"
+	@echo "================================================================"
+
+$(BIN): $(SRC)
+	$(CXX) $(CXXFLAGS) \
+	    -I$(TFL_INC) \
+	    -I$(OPENCV_INC) \
+	    $< -o $@ \
+	    -L$(TFL_LIB) \
+	    -l$(TFL_LINK) \
+	    $(CV_LIBS) \
+	    -ldl -lpthread -lm \
+	    -Wl,-rpath,$(TFL_LIB)
+
+clean:
+	rm -f $(BIN)
+
+.PHONY: all clean
